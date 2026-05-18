@@ -323,6 +323,22 @@ async def api_reject(sub_id: int, request: Request):
         )
     return {"rejected": sub_id}
 
+
+@app.patch("/api/submissions/{sub_id}")
+async def api_update_submission(sub_id: int, request: Request):
+    """Edit blocklist content of a pending submission."""
+    require_admin(request)
+    body = await request.json()
+    blocklist = str(body.get("blocklist", ""))
+    with get_db() as c:
+        row = c.execute("SELECT status FROM submissions WHERE id=?", (sub_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Submission not found")
+        if row["status"] != "pending":
+            raise HTTPException(400, "Only pending submissions can be edited")
+        c.execute("UPDATE submissions SET blocklist=? WHERE id=?", (blocklist, sub_id))
+    return {"updated": sub_id}
+
 # ── Deploy ─────────────────────────────────────────────────────────────────────
 
 @app.get("/api/deploy/preview")

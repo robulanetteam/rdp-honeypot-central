@@ -94,9 +94,13 @@
         <div id="detail-meta" class="text-xs text-gray-500 mb-4 grid grid-cols-3 gap-4"></div>
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
           <div>
-            <p class="text-xs text-gray-500 mb-1 flex justify-between">
+            <p class="text-xs text-gray-500 mb-1 flex justify-between items-center">
               <span>Blocklist</span>
-              <span id="detail-bl-count" class="text-green-400"></span>
+              <span class="flex items-center gap-2">
+                <button id="bl-save-btn" onclick="saveBlocklist()"
+                  class="hidden text-xs bg-orange-600 hover:bg-orange-500 text-white rounded px-2 py-0.5 font-bold transition-colors">Save</button>
+                <span id="detail-bl-count" class="text-green-400"></span>
+              </span>
             </p>
             <textarea id="detail-bl"
               class="w-full h-72 bg-gray-900 text-green-400 text-xs p-3 rounded border border-gray-700 font-mono resize-none focus:outline-none"
@@ -200,6 +204,7 @@
 
 let ADMIN_TOKEN = '';
 let currentSubFilter = 'pending';
+let currentDetailId = null;
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
 
@@ -371,6 +376,7 @@ async function showDetail(id) {
   const s = await api('GET', `/api/submissions/${id}`).catch(e => { alert(e); });
   if (!s) return;
 
+  currentDetailId = s.id;
   document.getElementById('sub-detail').classList.remove('hidden');
   document.getElementById('detail-title').textContent = `Submission #${s.id}  ·  ${s.node_label}`;
 
@@ -385,7 +391,23 @@ async function showDetail(id) {
     ? s.blocklist.split('\n').filter(l => l.trim() && !l.startsWith('#'))
     : [];
   document.getElementById('detail-bl-count').textContent = `${ips.length} IPs`;
-  document.getElementById('detail-bl').value = s.blocklist || '(empty)';
+  const blTa = document.getElementById('detail-bl');
+  blTa.value = s.blocklist || '';
+  const saveBtn = document.getElementById('bl-save-btn');
+  if (s.status === 'pending') {
+    blTa.removeAttribute('readonly');
+    blTa.classList.add('border-orange-700');
+    blTa.oninput = () => {
+      const cnt = blTa.value.split('\n').filter(l => l.trim() && !l.startsWith('#')).length;
+      document.getElementById('detail-bl-count').textContent = `${cnt} IPs`;
+    };
+    saveBtn.classList.remove('hidden');
+  } else {
+    blTa.setAttribute('readonly', '');
+    blTa.classList.remove('border-orange-700');
+    blTa.oninput = null;
+    saveBtn.classList.add('hidden');
+  }
 
   // Analytics
   let analytics = [];
@@ -414,6 +436,19 @@ async function showDetail(id) {
 
 function closeDetail() {
   document.getElementById('sub-detail').classList.add('hidden');
+}
+
+async function saveBlocklist() {
+  if (!currentDetailId) return;
+  const ta  = document.getElementById('detail-bl');
+  const btn = document.getElementById('bl-save-btn');
+  await api('PATCH', `/api/submissions/${currentDetailId}`, { blocklist: ta.value });
+  btn.textContent = 'Saved ✓';
+  btn.classList.replace('bg-orange-600', 'bg-green-700');
+  setTimeout(() => {
+    btn.textContent = 'Save';
+    btn.classList.replace('bg-green-700', 'bg-orange-600');
+  }, 1500);
 }
 
 async function quickApprove(id) {
