@@ -765,36 +765,83 @@ function renderAnalyticsStats(events) {
     </div>`;
 }
 
+// Analytics table state
+let _anEvents = [];
+let _anSort   = { col: 'ts', dir: -1 };  // default: время ↓
+
 function renderAnalyticsTable(events) {
+  _anEvents = events;
+  _anSort   = { col: 'ts', dir: -1 };
+  _renderAnTable();
+}
+
+function _anSortBy(col) {
+  if (_anSort.col === col) {
+    _anSort.dir *= -1;
+  } else {
+    _anSort.col = col;
+    _anSort.dir = col === 'ts' ? -1 : 1;
+  }
+  _renderAnTable();
+}
+
+function _renderAnTable() {
   const el = document.getElementById('detail-an-table');
   if (!el) return;
-  if (!events.length) {
+  if (!_anEvents.length) {
     el.innerHTML = '<p class="text-gray-600 p-3">Нет данных аналитики</p>';
     return;
   }
+
   const clsColor = {
     scanner:     'text-yellow-400',
     bruteforcer: 'text-red-400',
     accidental:  'text-gray-400',
     unknown:     'text-gray-600',
   };
-  const rows = [...events].reverse().slice(0, 300);
+
+  const getEpoch = e => {
+    const ts = e.timestamp || e.ts;
+    if (!ts) return 0;
+    return typeof ts === 'number' ? ts : new Date(ts).getTime() / 1000;
+  };
+
+  const comparators = {
+    ip:      (a, b) => (a.source_ip || '').localeCompare(b.source_ip || ''),
+    cls:     (a, b) => (a.classification || '').localeCompare(b.classification || ''),
+    country: (a, b) => (a.country || '').localeCompare(b.country || ''),
+    sess:    (a, b) => (a.sessions_total || 0) - (b.sessions_total || 0),
+    cred:    (a, b) => (a.has_credentials ? 1 : 0) - (b.has_credentials ? 1 : 0),
+    ts:      (a, b) => getEpoch(a) - getEpoch(b),
+  };
+
+  const sorted = [..._anEvents].sort((a, b) => _anSort.dir * (comparators[_anSort.col] || comparators.ts)(a, b));
+  const rows   = sorted.slice(0, 300);
+
+  const arrow = col => {
+    if (_anSort.col !== col) return '<span class="text-gray-700 ml-0.5 select-none">⇅</span>';
+    return _anSort.dir > 0
+      ? '<span class="text-orange-400 ml-0.5 select-none">↑</span>'
+      : '<span class="text-orange-400 ml-0.5 select-none">↓</span>';
+  };
+
+  const thCls = 'px-3 py-1.5 font-normal cursor-pointer hover:text-gray-300 select-none whitespace-nowrap';
+
   el.innerHTML = `
     <table class="w-full">
       <thead class="sticky top-0 bg-gray-800 text-gray-500 border-b border-gray-700">
         <tr>
-          <th class="px-3 py-1.5 text-left font-normal">IP</th>
-          <th class="px-3 py-1.5 text-left font-normal">Тип</th>
-          <th class="px-3 py-1.5 text-left font-normal">Страна</th>
-          <th class="px-3 py-1.5 text-right font-normal">Сессий</th>
-          <th class="px-3 py-1.5 text-center font-normal" title="Пароль захвачен">🔑</th>
-          <th class="px-3 py-1.5 text-left font-normal">Время</th>
+          <th class="${thCls} text-left"  onclick="_anSortBy('ip')">IP ${arrow('ip')}</th>
+          <th class="${thCls} text-left"  onclick="_anSortBy('cls')">Тип ${arrow('cls')}</th>
+          <th class="${thCls} text-left"  onclick="_anSortBy('country')">Страна ${arrow('country')}</th>
+          <th class="${thCls} text-right" onclick="_anSortBy('sess')">Сессий ${arrow('sess')}</th>
+          <th class="${thCls} text-center" onclick="_anSortBy('cred')" title="Пароль захвачен">🔑 ${arrow('cred')}</th>
+          <th class="${thCls} text-left"  onclick="_anSortBy('ts')">Время ${arrow('ts')}</th>
         </tr>
       </thead>
       <tbody class="divide-y divide-gray-700/40">
         ${rows.map(e => {
-          const ts = e.timestamp || e.ts;
-          const epoch = ts ? (typeof ts === 'number' ? ts : new Date(ts).getTime() / 1000) : null;
+          const epoch = getEpoch(e);
           const cls   = e.classification || 'unknown';
           return `<tr class="hover:bg-gray-800/60">
             <td class="px-3 py-1 font-mono text-gray-200 whitespace-nowrap">${esc(e.source_ip || '—')}</td>
