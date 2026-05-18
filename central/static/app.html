@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Honeypot Central</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: 'Courier New', monospace; }
+  .tab-btn { padding: 0.35rem 1rem; border-radius: 0.375rem; font-size: 0.75rem; color: #9ca3af; transition: all 0.15s; }
+  .tab-btn:hover { color: #fff; }
+  .tab-btn.active { background: #374151; color: #fb923c; }
+  .filter-btn { padding: 0.2rem 0.75rem; border-radius: 0.375rem; font-size: 0.7rem; background: #374151; color: #9ca3af; transition: background 0.15s; }
+  .filter-btn:hover { color: #fff; }
+  .filter-btn.active { background: #ea580c; color: #fff; }
+  .trow:hover { background: #1f2937; cursor: pointer; }
+  .badge-pending  { background:#78350f; color:#fde68a; }
+  .badge-approved { background:#14532d; color:#86efac; }
+  .badge-rejected { background:#7f1d1d; color:#fca5a5; }
+  .badge-deployed { background:#1e3a5f; color:#93c5fd; }
+</style>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen text-sm">
+
+<!-- ═══ LOGIN ════════════════════════════════════════════════════════════════ -->
+<div id="login" class="fixed inset-0 bg-gray-900 flex items-center justify-center z-50">
+  <div class="bg-gray-800 border border-gray-700 p-8 rounded-xl shadow-2xl w-80">
+    <div class="text-center mb-6">
+      <div class="text-4xl mb-2">🍯</div>
+      <h1 class="text-lg font-bold text-orange-400">Honeypot Central</h1>
+      <p class="text-gray-500 text-xs mt-1">Centralized honeypot management</p>
+    </div>
+    <label class="block text-gray-400 text-xs mb-1">Admin Token</label>
+    <input id="token-input" type="password" autocomplete="current-password"
+      class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 mb-4 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent"
+      placeholder="Enter admin token">
+    <button onclick="doLogin()"
+      class="w-full bg-orange-600 hover:bg-orange-500 text-white rounded px-4 py-2 font-bold text-sm transition-colors">
+      Login
+    </button>
+    <p id="login-err" class="text-red-400 text-xs mt-2 text-center hidden">Invalid token</p>
+  </div>
+</div>
+
+<!-- ═══ MAIN APP ══════════════════════════════════════════════════════════════ -->
+<div id="app" class="hidden flex flex-col min-h-screen">
+
+  <!-- Header -->
+  <header class="bg-gray-800 border-b border-gray-700 px-6 py-3 flex items-center justify-between sticky top-0 z-10">
+    <div class="flex items-center gap-2">
+      <span class="text-xl">🍯</span>
+      <span class="font-bold text-white">Honeypot Central</span>
+    </div>
+    <nav class="flex gap-1">
+      <button onclick="setTab('nodes')"       id="tab-nodes"       class="tab-btn">Nodes</button>
+      <button onclick="setTab('submissions')" id="tab-submissions" class="tab-btn">Submissions</button>
+      <button onclick="setTab('deploy')"      id="tab-deploy"      class="tab-btn">Deploy</button>
+      <button onclick="setTab('settings')"    id="tab-settings"    class="tab-btn">Settings</button>
+    </nav>
+    <button onclick="logout()" class="text-gray-600 hover:text-gray-400 text-xs">Logout</button>
+  </header>
+
+  <!-- Content -->
+  <main class="flex-1 p-6 max-w-7xl mx-auto w-full">
+
+    <!-- ── NODES ─────────────────────────────────────────────────────────── -->
+    <div id="pane-nodes" class="pane">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-orange-400 font-bold">Honeypot Nodes</h2>
+        <button onclick="loadNodes()" class="text-xs text-gray-500 hover:text-gray-300">↺ Refresh</button>
+      </div>
+      <div id="nodes-grid" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4"></div>
+    </div>
+
+    <!-- ── SUBMISSIONS ────────────────────────────────────────────────────── -->
+    <div id="pane-submissions" class="pane hidden">
+      <div class="flex items-center gap-3 mb-4">
+        <button onclick="loadSubs('pending')"   id="filter-pending"   class="filter-btn">Pending</button>
+        <button onclick="loadSubs('approved')"  id="filter-approved"  class="filter-btn">Approved</button>
+        <button onclick="loadSubs('rejected')"  id="filter-rejected"  class="filter-btn">Rejected</button>
+        <button onclick="loadSubs('deployed')"  id="filter-deployed"  class="filter-btn">Deployed</button>
+        <span class="ml-auto text-xs text-gray-600" id="subs-count"></span>
+      </div>
+
+      <div id="subs-table" class="overflow-x-auto bg-gray-800 rounded-lg border border-gray-700"></div>
+
+      <!-- Detail panel -->
+      <div id="sub-detail" class="hidden mt-4 bg-gray-800 rounded-xl border border-gray-700 p-5">
+        <div class="flex justify-between items-center mb-4">
+          <h3 class="font-bold text-orange-400 text-base" id="detail-title"></h3>
+          <button onclick="closeDetail()" class="text-gray-600 hover:text-gray-300 text-lg leading-none">✕</button>
+        </div>
+        <div class="flex gap-2 mb-4" id="detail-actions"></div>
+        <div id="detail-meta" class="text-xs text-gray-500 mb-4 grid grid-cols-3 gap-4"></div>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div>
+            <p class="text-xs text-gray-500 mb-1 flex justify-between">
+              <span>Blocklist</span>
+              <span id="detail-bl-count" class="text-green-400"></span>
+            </p>
+            <textarea id="detail-bl"
+              class="w-full h-72 bg-gray-900 text-green-400 text-xs p-3 rounded border border-gray-700 font-mono resize-none focus:outline-none"
+              readonly spellcheck="false"></textarea>
+          </div>
+          <div>
+            <p class="text-xs text-gray-500 mb-1 flex justify-between">
+              <span>Analytics (last 50 events)</span>
+              <span id="detail-an-count" class="text-blue-400"></span>
+            </p>
+            <textarea id="detail-an"
+              class="w-full h-72 bg-gray-900 text-blue-400 text-xs p-3 rounded border border-gray-700 font-mono resize-none focus:outline-none"
+              readonly spellcheck="false"></textarea>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── DEPLOY ─────────────────────────────────────────────────────────── -->
+    <div id="pane-deploy" class="pane hidden">
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+
+        <div class="bg-gray-800 rounded-xl border border-gray-700 p-5">
+          <h2 class="font-bold text-orange-400 mb-4">Deploy Queue</h2>
+          <div id="deploy-preview" class="text-gray-400 mb-4">Loading…</div>
+          <button onclick="doDeploy()" id="deploy-btn"
+            class="w-full bg-green-700 hover:bg-green-600 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded px-4 py-2.5 font-bold text-sm transition-colors">
+            Deploy to Mirror
+          </button>
+          <p id="deploy-msg" class="text-xs mt-3 text-green-400 hidden"></p>
+          <p id="deploy-err" class="text-xs mt-3 text-red-400 hidden"></p>
+        </div>
+
+        <div class="bg-gray-800 rounded-xl border border-gray-700 p-5">
+          <h2 class="font-bold text-orange-400 mb-4">Deployment History</h2>
+          <div id="deploy-history" class="text-gray-400 text-xs divide-y divide-gray-700"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── SETTINGS ───────────────────────────────────────────────────────── -->
+    <div id="pane-settings" class="pane hidden">
+      <div class="max-w-lg space-y-4">
+
+        <div class="bg-gray-800 rounded-xl border border-gray-700 p-5">
+          <h2 class="font-bold text-orange-400 mb-3">Register New Node</h2>
+          <div class="grid grid-cols-2 gap-2 mb-3">
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">Node ID</label>
+              <input id="new-node-id" placeholder="rdp-home"
+                class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500">
+            </div>
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">Label</label>
+              <input id="new-node-label" placeholder="Home RDP Honeypot"
+                class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500">
+            </div>
+          </div>
+          <button onclick="addNode()"
+            class="w-full bg-orange-600 hover:bg-orange-500 text-white rounded px-4 py-2 text-sm font-bold transition-colors">
+            Add Node
+          </button>
+          <div id="new-node-result" class="mt-3"></div>
+        </div>
+
+        <div class="bg-gray-800 rounded-xl border border-gray-700 p-5">
+          <h2 class="font-bold text-orange-400 mb-3">Registered Nodes</h2>
+          <div id="settings-nodes-list" class="divide-y divide-gray-700"></div>
+        </div>
+
+      </div>
+    </div>
+
+  </main>
+</div><!-- /#app -->
+
+<script>
+'use strict';
+
+let ADMIN_TOKEN = '';
+let currentSubFilter = 'pending';
+
+// ── Auth ─────────────────────────────────────────────────────────────────────
+
+async function doLogin() {
+  const tok = document.getElementById('token-input').value.trim();
+  if (!tok) return;
+  const r = await fetch('/api/nodes', { headers: { 'x-admin-token': tok } });
+  if (r.ok) {
+    ADMIN_TOKEN = tok;
+    localStorage.setItem('admin_token', tok);
+    showApp();
+  } else {
+    document.getElementById('login-err').classList.remove('hidden');
+  }
+}
+
+function showApp() {
+  document.getElementById('login').classList.add('hidden');
+  document.getElementById('app').classList.remove('hidden');
+  setTab('nodes');
+}
+
+function logout() {
+  localStorage.removeItem('admin_token');
+  location.reload();
+}
+
+document.getElementById('token-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') doLogin();
+});
+
+// Auto-login from saved token
+const savedTok = localStorage.getItem('admin_token');
+if (savedTok) {
+  ADMIN_TOKEN = savedTok;
+  fetch('/api/nodes', { headers: { 'x-admin-token': savedTok } })
+    .then(r => r.ok ? showApp() : localStorage.removeItem('admin_token'));
+}
+
+// ── Tabs ─────────────────────────────────────────────────────────────────────
+
+function setTab(name) {
+  document.querySelectorAll('.pane').forEach(p => p.classList.add('hidden'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('pane-' + name).classList.remove('hidden');
+  document.getElementById('tab-'  + name).classList.add('active');
+  const loaders = {
+    nodes:       () => loadNodes(),
+    submissions: () => loadSubs(currentSubFilter),
+    deploy:      () => loadDeploy(),
+    settings:    () => loadSettingsNodes(),
+  };
+  loaders[name]?.();
+}
+
+// ── API helper ───────────────────────────────────────────────────────────────
+
+async function api(method, path, body) {
+  const opts = {
+    method,
+    headers: { 'x-admin-token': ADMIN_TOKEN, 'content-type': 'application/json' },
+  };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const r = await fetch(path, opts);
+  if (!r.ok) {
+    const text = await r.text().catch(() => r.statusText);
+    throw new Error(text);
+  }
+  return r.json();
+}
+
+// ── Nodes ─────────────────────────────────────────────────────────────────────
+
+async function loadNodes() {
+  const nodes = await api('GET', '/api/nodes').catch(e => { alert(e); return []; });
+  const grid = document.getElementById('nodes-grid');
+  if (!nodes.length) {
+    grid.innerHTML = '<p class="text-gray-500 col-span-3 text-sm">No nodes registered yet. Go to <button onclick="setTab(\'settings\')" class="text-orange-400 underline">Settings</button> to add one.</p>';
+    return;
+  }
+  grid.innerHTML = nodes.map(n => `
+    <div class="bg-gray-800 rounded-xl p-4 border ${n.online ? 'border-green-700' : 'border-gray-700'}">
+      <div class="flex justify-between items-start mb-3">
+        <div>
+          <p class="font-bold text-white">${esc(n.label)}</p>
+          <p class="text-gray-500 text-xs">${esc(n.id)}</p>
+        </div>
+        <span class="px-2 py-0.5 rounded text-xs font-bold ${n.online ? 'bg-green-900 text-green-300' : 'bg-gray-700 text-gray-500'}">
+          ${n.online ? '● ONLINE' : '○ OFFLINE'}
+        </span>
+      </div>
+      <div class="text-xs space-y-1 text-gray-400">
+        <div class="flex justify-between">
+          <span>Last seen</span>
+          <span class="text-gray-200">${n.last_seen ? fmtAgo(n.last_seen_ago) : 'never'}</span>
+        </div>
+        <div class="flex justify-between">
+          <span>Last IP</span>
+          <span class="text-gray-200">${esc(n.last_ip || '—')}</span>
+        </div>
+        <div class="flex justify-between border-t border-gray-700 pt-1 mt-1">
+          <span>Pending</span>
+          <span class="text-orange-300 font-bold">${n.pending_count ?? 0}</span>
+        </div>
+        <div class="flex justify-between">
+          <span>Approved</span>
+          <span class="text-green-400">${n.approved_count ?? 0}</span>
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+// ── Submissions ───────────────────────────────────────────────────────────────
+
+async function loadSubs(status) {
+  currentSubFilter = status;
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('filter-' + status).classList.add('active');
+  closeDetail();
+
+  const subs = await api('GET', `/api/submissions?status=${status}`).catch(e => { alert(e); return []; });
+  document.getElementById('subs-count').textContent = subs.length ? `${subs.length} items` : '';
+  const el = document.getElementById('subs-table');
+
+  if (!subs.length) {
+    el.innerHTML = '<p class="text-gray-500 text-sm p-4">No submissions with this status.</p>';
+    return;
+  }
+
+  el.innerHTML = `
+    <table class="w-full text-xs">
+      <thead class="text-gray-500 border-b border-gray-700">
+        <tr class="text-left">
+          <th class="px-4 py-2 w-10">#</th>
+          <th class="px-4 py-2">Node</th>
+          <th class="px-4 py-2">Submitted</th>
+          <th class="px-4 py-2 text-right">IPs</th>
+          <th class="px-4 py-2 text-right">Events</th>
+          <th class="px-4 py-2">Status</th>
+          <th class="px-4 py-2 w-16"></th>
+        </tr>
+      </thead>
+      <tbody>
+        ${subs.map(s => `
+        <tr class="trow border-b border-gray-700/50" onclick="showDetail(${s.id})">
+          <td class="px-4 py-2 text-gray-600">${s.id}</td>
+          <td class="px-4 py-2 text-orange-300 font-bold">${esc(s.node_label)}</td>
+          <td class="px-4 py-2 text-gray-300">${fmtTs(s.submitted_at)}</td>
+          <td class="px-4 py-2 text-right text-green-400">${s.bl_size ? Math.round(s.bl_size / 18) : 0}</td>
+          <td class="px-4 py-2 text-right text-blue-400">${s.analytics_count ?? 0}</td>
+          <td class="px-4 py-2">
+            <span class="px-2 py-0.5 rounded text-xs badge-${s.status}">${s.status}</span>
+          </td>
+          <td class="px-4 py-2 text-right whitespace-nowrap">
+            ${s.status === 'pending' ? `
+              <button onclick="event.stopPropagation(); quickApprove(${s.id})" title="Approve"
+                class="text-green-500 hover:text-green-300 mr-2 font-bold">✓</button>
+              <button onclick="event.stopPropagation(); quickReject(${s.id})" title="Reject"
+                class="text-red-500 hover:text-red-300 font-bold">✗</button>
+            ` : ''}
+          </td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`;
+}
+
+async function showDetail(id) {
+  const s = await api('GET', `/api/submissions/${id}`).catch(e => { alert(e); });
+  if (!s) return;
+
+  document.getElementById('sub-detail').classList.remove('hidden');
+  document.getElementById('detail-title').textContent = `Submission #${s.id}  ·  ${s.node_label}`;
+
+  // Meta
+  document.getElementById('detail-meta').innerHTML = `
+    <div><span class="text-gray-600">Submitted</span><br><span class="text-gray-300">${fmtTs(s.submitted_at)}</span></div>
+    <div><span class="text-gray-600">Status</span><br><span class="badge-${s.status} px-2 py-0.5 rounded">${s.status}</span></div>
+    <div><span class="text-gray-600">Hash</span><br><span class="text-gray-500">${s.content_hash.slice(0,16)}…</span></div>`;
+
+  // Blocklist
+  const ips = s.blocklist
+    ? s.blocklist.split('\n').filter(l => l.trim() && !l.startsWith('#'))
+    : [];
+  document.getElementById('detail-bl-count').textContent = `${ips.length} IPs`;
+  document.getElementById('detail-bl').value = s.blocklist || '(empty)';
+
+  // Analytics
+  let analytics = [];
+  try { analytics = s.analytics ? JSON.parse(s.analytics) : []; } catch(_) {}
+  document.getElementById('detail-an-count').textContent = `${analytics.length} events`;
+  document.getElementById('detail-an').value = analytics.length
+    ? analytics.slice(-50).map(e => JSON.stringify(e)).join('\n')
+    : '(empty)';
+
+  // Actions
+  const actions = document.getElementById('detail-actions');
+  if (s.status === 'pending') {
+    actions.innerHTML = `
+      <button onclick="quickApprove(${s.id})"
+        class="bg-green-700 hover:bg-green-600 text-white rounded px-4 py-1.5 text-xs font-bold">✓ Approve</button>
+      <button onclick="quickReject(${s.id})"
+        class="bg-red-800 hover:bg-red-700 text-white rounded px-4 py-1.5 text-xs font-bold">✗ Reject</button>`;
+  } else if (s.status === 'approved') {
+    actions.innerHTML = `<span class="text-green-400 text-xs">✓ Approved — will be included in next deploy</span>`;
+  } else {
+    actions.innerHTML = '';
+  }
+
+  document.getElementById('sub-detail').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function closeDetail() {
+  document.getElementById('sub-detail').classList.add('hidden');
+}
+
+async function quickApprove(id) {
+  await api('POST', `/api/submissions/${id}/approve`);
+  await loadSubs(currentSubFilter);
+  closeDetail();
+}
+
+async function quickReject(id) {
+  const note = prompt('Rejection note (optional):') ?? '';
+  await api('POST', `/api/submissions/${id}/reject`, { note });
+  await loadSubs(currentSubFilter);
+  closeDetail();
+}
+
+// ── Deploy ────────────────────────────────────────────────────────────────────
+
+async function loadDeploy() {
+  const [preview, history] = await Promise.all([
+    api('GET', '/api/deploy/preview').catch(() => ({ ip_count: 0, sources: [] })),
+    api('GET', '/api/deployments').catch(() => []),
+  ]);
+
+  const preEl = document.getElementById('deploy-preview');
+  const btn   = document.getElementById('deploy-btn');
+  if (preview.ip_count > 0) {
+    preEl.innerHTML = `
+      <div class="text-3xl font-bold text-white mb-1">${preview.ip_count}
+        <span class="text-sm font-normal text-gray-400">unique IPs ready</span>
+      </div>
+      <p class="text-xs text-gray-500">Sources: ${preview.sources.map(esc).join(', ') || '—'}</p>`;
+    btn.disabled = false;
+  } else {
+    preEl.innerHTML = '<p class="text-gray-500 text-sm">No approved submissions pending deployment.</p>';
+    btn.disabled = true;
+  }
+
+  const histEl = document.getElementById('deploy-history');
+  histEl.innerHTML = history.length
+    ? history.map(d => `
+        <div class="py-2 flex justify-between items-center">
+          <div>
+            <p class="text-gray-300">${fmtTs(d.created_at)}</p>
+            <p class="text-gray-600 text-xs truncate max-w-xs">${esc(d.path)}</p>
+          </div>
+          <span class="text-green-400 font-bold ml-4">${d.ip_count} IPs</span>
+        </div>`).join('')
+    : '<p class="text-gray-500">No deployments yet.</p>';
+}
+
+async function doDeploy() {
+  const btn = document.getElementById('deploy-btn');
+  const msg = document.getElementById('deploy-msg');
+  const err = document.getElementById('deploy-err');
+  msg.classList.add('hidden');
+  err.classList.add('hidden');
+  btn.disabled = true;
+  btn.textContent = 'Deploying…';
+  try {
+    const r = await api('POST', '/api/deploy');
+    msg.textContent = `✓ Deployed ${r.deployed_ips} IPs from ${r.from_submissions.length} submission(s) → ${r.path}`;
+    msg.classList.remove('hidden');
+    await loadDeploy();
+  } catch(e) {
+    err.textContent = '✗ ' + e.message;
+    err.classList.remove('hidden');
+    btn.disabled = false;
+  }
+  btn.textContent = 'Deploy to Mirror';
+}
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+
+async function loadSettingsNodes() {
+  const nodes = await api('GET', '/api/nodes').catch(() => []);
+  const el = document.getElementById('settings-nodes-list');
+  el.innerHTML = nodes.length
+    ? nodes.map(n => `
+        <div class="flex justify-between items-center py-2">
+          <div>
+            <span class="text-white font-bold">${esc(n.label)}</span>
+            <span class="text-gray-500 text-xs ml-2">${esc(n.id)}</span>
+          </div>
+          <button onclick="delNode('${esc(n.id)}')"
+            class="text-red-600 hover:text-red-400 text-xs transition-colors">Delete</button>
+        </div>`).join('')
+    : '<p class="text-gray-500 text-xs">No nodes registered yet.</p>';
+}
+
+async function addNode() {
+  const nid   = document.getElementById('new-node-id').value.trim();
+  const label = document.getElementById('new-node-label').value.trim();
+  if (!nid || !label) { alert('Fill in both Node ID and Label'); return; }
+  try {
+    const r = await api('POST', '/api/nodes', { node_id: nid, label });
+    document.getElementById('new-node-result').innerHTML = `
+      <div class="bg-gray-900 border border-gray-700 rounded p-3 text-xs">
+        <p class="text-green-400 font-bold mb-1">✓ Node registered!</p>
+        <p class="text-gray-400">Node ID: <span class="text-white">${esc(r.node_id)}</span></p>
+        <p class="text-gray-400 mt-1">Token (save it now – shown once):</p>
+        <div class="mt-1 bg-black/40 rounded p-2 select-all text-yellow-300 break-all">${esc(r.token)}</div>
+        <p class="text-gray-600 mt-2">Put this token in <code>config.json</code> on the node.</p>
+      </div>`;
+    document.getElementById('new-node-id').value    = '';
+    document.getElementById('new-node-label').value = '';
+    loadSettingsNodes();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function delNode(id) {
+  if (!confirm(`Delete node "${id}" and all its submissions?`)) return;
+  try {
+    await api('DELETE', `/api/nodes/${id}`);
+    loadSettingsNodes();
+    loadNodes();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+// ── Utils ─────────────────────────────────────────────────────────────────────
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c =>
+    ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+}
+
+function fmtTs(ts) {
+  if (!ts) return '—';
+  return new Date(ts * 1000).toLocaleString('ru-RU', {
+    day: '2-digit', month: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit'
+  });
+}
+
+function fmtAgo(secs) {
+  if (secs === null || secs === undefined) return 'never';
+  if (secs <    60) return secs + 's ago';
+  if (secs <  3600) return Math.floor(secs / 60)   + 'm ago';
+  if (secs < 86400) return Math.floor(secs / 3600) + 'h ago';
+  return Math.floor(secs / 86400) + 'd ago';
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run honeypot agent every 15 minutes
+Requires=honeypot-agent.service
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+Unit=honeypot-agent.service
+
+[Install]
+WantedBy=timers.target

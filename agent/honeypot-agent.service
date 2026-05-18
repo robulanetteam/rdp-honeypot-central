@@ -1,0 +1,13 @@
+[Unit]
+Description=Honeypot Central Agent – submit data to central server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=ENVFILE_PLACEHOLDER
+ExecStart=/usr/bin/python3 /opt/honeypot-agent/agent.py
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=60

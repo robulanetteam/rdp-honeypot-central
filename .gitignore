@@ -1,0 +1,15 @@
+# Sensitive data
+central/.env
+agent/.env
+*.env
+
+# Runtime data
+central/data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# OS
+.DS_Store

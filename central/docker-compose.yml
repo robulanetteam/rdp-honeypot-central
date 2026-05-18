@@ -1,0 +1,23 @@
+version: "3.9"
+
+# To use a pre-built image from registry:
+#   IMAGE=ghcr.io/youruser/honeypot-central docker compose up -d
+# To build locally:
+#   docker compose up -d --build
+
+services:
+  central:
+    image: ${IMAGE:-honeypot-central:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: honeypot-central
+    restart: unless-stopped
+    ports:
+      - "8100:8000"          # web UI: http://your-server:8100
+    volumes:
+      - ./data:/data         # SQLite DB + deployed blocklist.txt
+    env_file:
+      - .env
+    environment:
+      - ONLINE_SECS=${ONLINE_SECS:-900}

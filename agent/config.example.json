@@ -1,0 +1,7 @@
+{
+  "server_url":   "http://192.168.90.1:8100",
+  "node_id":      "rdp-home",
+  "token":        "REPLACE_WITH_TOKEN_FROM_CENTRAL_UI",
+  "data_dir":     "/home/homeserver/rdp_honeypot/rdp_honeypot/data",
+  "insecure_ssl": false
+}

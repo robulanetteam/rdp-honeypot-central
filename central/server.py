@@ -1,0 +1,405 @@
+#!/usr/bin/env python3
+"""
+Honeypot Central Management Server
+
+Collects data from distributed honeypot nodes, provides review workflow
+and merged deployment to mirror.
+
+Env vars:
+  DB_PATH      – path to SQLite database (default: /data/central.db)
+  DEPLOY_PATH  – directory where merged blocklist.txt is written (default: /data/public)
+  STATIC_PATH  – path to static/ directory with app.html (default: /app/static)
+  ADMIN_TOKEN  – admin secret for web UI (default: change-me)
+  ONLINE_SECS  – seconds before node is considered offline (default: 900)
+"""
+
+import json
+import hashlib
+import os
+import secrets
+import sqlite3
+import time
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Optional
+
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+# ── Config ─────────────────────────────────────────────────────────────────────
+
+DB_PATH     = Path(os.environ.get("DB_PATH",     "/data/central.db"))
+DEPLOY_PATH = Path(os.environ.get("DEPLOY_PATH", "/data/public"))
+STATIC_PATH = Path(os.environ.get("STATIC_PATH", "/app/static"))
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN",       "change-me")
+ONLINE_SECS = int(os.environ.get("ONLINE_SECS",  "900"))
+
+# ── Database ───────────────────────────────────────────────────────────────────
+
+@contextmanager
+def get_db():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def init_db():
+    with get_db() as c:
+        c.executescript("""
+        CREATE TABLE IF NOT EXISTS nodes (
+            id        TEXT PRIMARY KEY,
+            label     TEXT NOT NULL,
+            token     TEXT NOT NULL UNIQUE,
+            last_seen REAL,
+            last_ip   TEXT,
+            created   REAL DEFAULT (unixepoch())
+        );
+
+        CREATE TABLE IF NOT EXISTS submissions (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            node_id      TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+            submitted_at REAL DEFAULT (unixepoch()),
+            content_hash TEXT NOT NULL,
+            blocklist    TEXT,
+            analytics    TEXT,
+            status       TEXT DEFAULT 'pending',
+            reviewed_at  REAL,
+            note         TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS ix_sub_status ON submissions(status);
+        CREATE INDEX IF NOT EXISTS ix_sub_node   ON submissions(node_id);
+
+        CREATE TABLE IF NOT EXISTS deployments (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at REAL DEFAULT (unixepoch()),
+            sub_ids    TEXT,
+            ip_count   INTEGER,
+            path       TEXT
+        );
+        """)
+
+
+init_db()
+
+# ── App ────────────────────────────────────────────────────────────────────────
+
+app = FastAPI(title="Honeypot Central", docs_url=None, redoc_url=None)
+app.mount("/static", StaticFiles(directory=str(STATIC_PATH)), name="static")
+
+# ── Auth ───────────────────────────────────────────────────────────────────────
+
+def require_admin(request: Request):
+    tok = (request.headers.get("x-admin-token") or
+           request.cookies.get("admin_token", ""))
+    if tok != ADMIN_TOKEN:
+        raise HTTPException(401, "Unauthorized")
+
+
+def node_from_token(token: str) -> dict:
+    with get_db() as c:
+        row = c.execute("SELECT * FROM nodes WHERE token=?", (token,)).fetchone()
+    if not row:
+        raise HTTPException(403, "Unknown node token")
+    return dict(row)
+
+# ── Models ─────────────────────────────────────────────────────────────────────
+
+class SubmitPayload(BaseModel):
+    node_id:   str
+    blocklist: Optional[str] = None   # raw text content of blocklist.txt
+    analytics: Optional[list] = None  # list of analytics event dicts
+
+# ── Static UI ──────────────────────────────────────────────────────────────────
+
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    return FileResponse(str(STATIC_PATH / "app.html"))
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# NODE API  (called by honeypot agents)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/api/submit")
+async def api_submit(
+    payload: SubmitPayload,
+    request: Request,
+    x_node_token: str = Header(...),
+):
+    """Honeypot node submits its current blocklist + analytics."""
+    node = node_from_token(x_node_token)
+    if node["id"] != payload.node_id:
+        raise HTTPException(403, "Token/node_id mismatch")
+
+    content_hash = hashlib.sha256(
+        json.dumps(
+            {"b": payload.blocklist, "a": payload.analytics},
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+
+    with get_db() as c:
+        # Update heartbeat
+        c.execute(
+            "UPDATE nodes SET last_seen=unixepoch(), last_ip=? WHERE id=?",
+            (request.client.host, node["id"]),
+        )
+
+        # Skip duplicate (same content already pending/approved)
+        dup = c.execute(
+            """SELECT id FROM submissions
+               WHERE node_id=? AND content_hash=?
+                 AND status NOT IN ('rejected','deployed')""",
+            (node["id"], content_hash),
+        ).fetchone()
+        if dup:
+            return {"status": "duplicate", "submission_id": dup["id"]}
+
+        cur = c.execute(
+            """INSERT INTO submissions
+               (node_id, content_hash, blocklist, analytics)
+               VALUES (?,?,?,?)""",
+            (
+                node["id"],
+                content_hash,
+                payload.blocklist,
+                json.dumps(payload.analytics) if payload.analytics else None,
+            ),
+        )
+        sub_id = cur.lastrowid
+
+    return {"status": "accepted", "submission_id": sub_id}
+
+
+@app.post("/api/heartbeat")
+async def api_heartbeat(
+    request: Request,
+    x_node_token: str = Header(...),
+):
+    """Lightweight heartbeat – updates last_seen without a full submission."""
+    node = node_from_token(x_node_token)
+    with get_db() as c:
+        c.execute(
+            "UPDATE nodes SET last_seen=unixepoch(), last_ip=? WHERE id=?",
+            (request.client.host, node["id"]),
+        )
+    return {"ok": True}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ADMIN API
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Nodes ──────────────────────────────────────────────────────────────────────
+
+@app.get("/api/nodes")
+async def api_get_nodes(request: Request):
+    require_admin(request)
+    now = time.time()
+    with get_db() as c:
+        rows = c.execute("""
+            SELECT n.*,
+                   COUNT(CASE WHEN s.status='pending'  THEN 1 END) AS pending_count,
+                   COUNT(CASE WHEN s.status='approved' THEN 1 END) AS approved_count
+            FROM nodes n
+            LEFT JOIN submissions s ON s.node_id = n.id
+            GROUP BY n.id
+            ORDER BY n.last_seen DESC
+        """).fetchall()
+
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["online"] = bool(r["last_seen"] and (now - r["last_seen"]) < ONLINE_SECS)
+        d["last_seen_ago"] = int(now - r["last_seen"]) if r["last_seen"] else None
+        result.append(d)
+    return result
+
+
+@app.post("/api/nodes")
+async def api_add_node(request: Request):
+    require_admin(request)
+    body = await request.json()
+    node_id = str(body.get("node_id", "")).strip()
+    label   = str(body.get("label",   "")).strip()
+    if not node_id or not label:
+        raise HTTPException(400, "node_id and label are required")
+
+    token = secrets.token_hex(32)
+    try:
+        with get_db() as c:
+            c.execute(
+                "INSERT INTO nodes (id, label, token) VALUES (?,?,?)",
+                (node_id, label, token),
+            )
+    except sqlite3.IntegrityError:
+        raise HTTPException(409, "Node ID already exists")
+
+    return {"node_id": node_id, "token": token}
+
+
+@app.delete("/api/nodes/{node_id}")
+async def api_del_node(node_id: str, request: Request):
+    require_admin(request)
+    with get_db() as c:
+        c.execute("DELETE FROM nodes WHERE id=?", (node_id,))
+    return {"deleted": node_id}
+
+# ── Submissions ────────────────────────────────────────────────────────────────
+
+@app.get("/api/submissions")
+async def api_get_submissions(request: Request, status: str = "pending"):
+    require_admin(request)
+    allowed = {"pending", "approved", "rejected", "deployed"}
+    if status not in allowed:
+        raise HTTPException(400, "Invalid status")
+    with get_db() as c:
+        rows = c.execute("""
+            SELECT s.id, s.node_id, s.submitted_at, s.content_hash,
+                   s.status, s.reviewed_at, s.note,
+                   n.label AS node_label,
+                   length(s.blocklist)  AS bl_size,
+                   CASE WHEN s.analytics IS NOT NULL
+                        THEN json_array_length(s.analytics) END AS analytics_count
+            FROM submissions s
+            JOIN nodes n ON s.node_id = n.id
+            WHERE s.status = ?
+            ORDER BY s.submitted_at DESC
+            LIMIT 500
+        """, (status,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/submissions/{sub_id}")
+async def api_get_submission(sub_id: int, request: Request):
+    require_admin(request)
+    with get_db() as c:
+        row = c.execute("""
+            SELECT s.*, n.label AS node_label
+            FROM submissions s
+            JOIN nodes n ON s.node_id = n.id
+            WHERE s.id = ?
+        """, (sub_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Submission not found")
+    return dict(row)
+
+
+@app.post("/api/submissions/{sub_id}/approve")
+async def api_approve(sub_id: int, request: Request):
+    require_admin(request)
+    with get_db() as c:
+        c.execute(
+            "UPDATE submissions SET status='approved', reviewed_at=unixepoch() WHERE id=?",
+            (sub_id,),
+        )
+    return {"approved": sub_id}
+
+
+@app.post("/api/submissions/{sub_id}/reject")
+async def api_reject(sub_id: int, request: Request):
+    require_admin(request)
+    body = await request.json()
+    note = str(body.get("note", ""))[:500]
+    with get_db() as c:
+        c.execute(
+            "UPDATE submissions SET status='rejected', reviewed_at=unixepoch(), note=? WHERE id=?",
+            (note, sub_id),
+        )
+    return {"rejected": sub_id}
+
+# ── Deploy ─────────────────────────────────────────────────────────────────────
+
+@app.get("/api/deploy/preview")
+async def api_deploy_preview(request: Request):
+    """Show what a deploy would produce without writing anything."""
+    require_admin(request)
+    with get_db() as c:
+        rows = c.execute("""
+            SELECT s.blocklist, n.label
+            FROM submissions s
+            JOIN nodes n ON s.node_id = n.id
+            WHERE s.status = 'approved'
+        """).fetchall()
+
+    ips: dict[str, str] = {}
+    sources: set[str] = set()
+    for row in rows:
+        if row["blocklist"]:
+            sources.add(row["label"])
+            for line in row["blocklist"].splitlines():
+                ip = line.strip()
+                if ip and not ip.startswith("#"):
+                    ips.setdefault(ip, row["label"])
+
+    return {
+        "ip_count": len(ips),
+        "sources":  sorted(sources),
+    }
+
+
+@app.post("/api/deploy")
+async def api_deploy(request: Request):
+    """Merge all approved submissions → write blocklist.txt → mark as deployed."""
+    require_admin(request)
+    with get_db() as c:
+        rows = c.execute("""
+            SELECT s.id, s.blocklist, n.label
+            FROM submissions s
+            JOIN nodes n ON s.node_id = n.id
+            WHERE s.status = 'approved'
+        """).fetchall()
+
+    if not rows:
+        raise HTTPException(400, "No approved submissions to deploy")
+
+    ips: dict[str, str] = {}
+    for row in rows:
+        if row["blocklist"]:
+            for line in row["blocklist"].splitlines():
+                ip = line.strip()
+                if ip and not ip.startswith("#"):
+                    ips.setdefault(ip, row["label"])
+
+    DEPLOY_PATH.mkdir(parents=True, exist_ok=True)
+    out = DEPLOY_PATH / "blocklist.txt"
+    out.write_text("\n".join(sorted(ips.keys())) + "\n")
+
+    sub_ids = [r["id"] for r in rows]
+    placeholders = ",".join("?" * len(sub_ids))
+    with get_db() as c:
+        c.execute(
+            f"UPDATE submissions SET status='deployed', reviewed_at=unixepoch() WHERE id IN ({placeholders})",
+            sub_ids,
+        )
+        c.execute(
+            "INSERT INTO deployments (sub_ids, ip_count, path) VALUES (?,?,?)",
+            (json.dumps(sub_ids), len(ips), str(out)),
+        )
+
+    return {
+        "deployed_ips":      len(ips),
+        "path":              str(out),
+        "from_submissions":  sub_ids,
+    }
+
+
+@app.get("/api/deployments")
+async def api_deployments(request: Request):
+    require_admin(request)
+    with get_db() as c:
+        rows = c.execute(
+            "SELECT * FROM deployments ORDER BY created_at DESC LIMIT 50"
+        ).fetchall()
+    return [dict(r) for r in rows]
