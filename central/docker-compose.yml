@@ -14,9 +14,10 @@ services:
     container_name: honeypot-central
     restart: unless-stopped
     ports:
-      - "8100:8000"          # web UI: http://your-server:8100
+      - "8100:8000"          # HTTPS web UI: https://your-server:8100
+      - "80:80"              # required for certbot HTTP-01 challenge (Let's Encrypt only)
     volumes:
-      - ./data:/data         # SQLite DB + deployed blocklist.txt
+      - ./data:/data         # SQLite DB + deployed blocklist + TLS certs
     env_file:
       - .env
     environment:

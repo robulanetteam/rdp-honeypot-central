@@ -2,19 +2,28 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# Install system deps: openssl (self-signed) + certbot (Let's Encrypt)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        openssl \
+        certbot \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY server.py .
 COPY static/ ./static/
+COPY docker-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
 ENV DB_PATH=/data/central.db \
     DEPLOY_PATH=/data/public \
     STATIC_PATH=/app/static \
     ADMIN_TOKEN=change-me \
-    ONLINE_SECS=900
+    ONLINE_SECS=900 \
+    PORT=8000
 
 VOLUME ["/data"]
-EXPOSE 8000
+EXPOSE 8000 80
 
-CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]
+ENTRYPOINT ["/entrypoint.sh"]
