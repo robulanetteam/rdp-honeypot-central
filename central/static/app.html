@@ -471,10 +471,23 @@ async function loadNodes() {
                 class="w-20 bg-gray-700 border border-gray-600 rounded px-2 py-0.5 text-right text-white text-xs">
             </div>
             <div class="text-gray-600 leading-relaxed" style="font-size:0.65rem">
-              <span class="text-red-400">брутфорс</span> 20+ IP: ~85–100 &nbsp;·&nbsp;
-              <span class="text-yellow-400">сканер</span> 5–19 IP: ~55–80 &nbsp;·&nbsp;
-              <span class="text-gray-500">дубли &gt;80%</span>: ~30–50
-              <div class="text-gray-700 mt-0.5">+30 есть аналитика &nbsp;·&nbsp; +30/+20/+10 ≥20/5/1 IP &nbsp;·&nbsp; +25/+10/−20 новых ≥50%/20%/&lt;5% &nbsp;·&nbsp; +15/+8 плотность ≥5/2</div>
+              <div class="mb-1 text-gray-500 font-semibold" style="font-size:0.6rem;letter-spacing:.04em">КАК СЧИТАЕТСЯ SCORE</div>
+              <table class="w-full mb-1" style="border-collapse:collapse">
+                <tr><td class="text-gray-500 pr-2">аналитика есть</td><td class="text-cyan-600 text-right">+30</td></tr>
+                <tr><td class="text-gray-500 pr-2">≥20 уникальных IP</td><td class="text-cyan-600 text-right">+30</td></tr>
+                <tr><td class="text-gray-500 pr-2">≥5 IP</td><td class="text-cyan-600 text-right">+20</td></tr>
+                <tr><td class="text-gray-500 pr-2">≥1 IP</td><td class="text-cyan-600 text-right">+10</td></tr>
+                <tr><td class="text-gray-500 pr-2">≥50% IP новые</td><td class="text-cyan-600 text-right">+25</td></tr>
+                <tr><td class="text-gray-500 pr-2">≥20% IP новые</td><td class="text-cyan-600 text-right">+10</td></tr>
+                <tr><td class="text-gray-500 pr-2">&lt;5% IP новые (дубль)</td><td class="text-red-700 text-right">−20</td></tr>
+                <tr><td class="text-gray-500 pr-2">плотность ≥5 событий/IP</td><td class="text-cyan-600 text-right">+15</td></tr>
+                <tr><td class="text-gray-500 pr-2">плотность ≥2 событий/IP</td><td class="text-cyan-600 text-right">+8</td></tr>
+              </table>
+              <div class="text-gray-700 border-t border-gray-700 pt-1 mt-0.5">
+                <span class="text-green-600">рекомендуется ≥70</span> — брутфорс 20+ IP с аналитикой = <span class="text-green-500">85–100</span> &nbsp;·&nbsp;
+                сканер 5–19 IP = <span class="text-yellow-600">55–75</span> &nbsp;·&nbsp;
+                почти все уже деплоены = <span class="text-red-700">10–40</span>
+              </div>
             </div>
           </div>
           <div class="flex items-center justify-between">
@@ -795,6 +808,53 @@ function _renderAnTable() {
 
   const clsColor = {
     scanner:     'text-yellow-400',
+    bruteforcer: 'text-red-400',
+    accidental:  'text-gray-400',
+    unknown:     'text-gray-600',
+  };
+
+  const getEpoch = e => {
+    const ts = e.timestamp || e.ts;
+    if (!ts) return 0;
+    return typeof ts === 'number' ? ts : new Date(ts).getTime() / 1000;
+  };
+
+  const comparators = {
+    ip:      (a, b) => (a.source_ip || '').localeCompare(b.source_ip || ''),
+    cls:     (a, b) => (a.classification || '').localeCompare(b.classification || ''),
+    country: (a, b) => (a.country || '').localeCompare(b.country || ''),
+    sess:    (a, b) => (a.sessions_total || 0) - (b.sessions_total || 0),
+    cred:    (a, b) => (a.has_credentials ? 1 : 0) - (b.has_credentials ? 1 : 0),
+    ts:      (a, b) => getEpoch(a) - getEpoch(b),
+  };
+
+  const sorted = [..._anEvents].sort((a, b) => _anSort.dir * (comparators[_anSort.col] || comparators.ts)(a, b));
+  const rows   = sorted.slice(0, 300);
+
+  const arrow = col => {
+    if (_anSort.col !== col) return '<span class="text-gray-700 ml-0.5 select-none">⇅</span>';
+    return _anSort.dir > 0
+      ? '<span class="text-orange-400 ml-0.5 select-none">↑</span>'
+      : '<span class="text-orange-400 ml-0.5 select-none">↓</span>';
+  };
+
+  const thCls = 'px-3 py-1.5 font-normal cursor-pointer hover:text-gray-300 select-none whitespace-nowrap';
+
+  el.innerHTML = `
+    <table class="w-full">
+      <thead class="sticky top-0 bg-gray-800 text-gray-500 border-b border-gray-700">
+        <tr>
+          <th class="${thCls} text-left"  onclick="_anSortBy('ip')">IP ${arrow('ip')}</th>
+          <th class="${thCls} text-left"  onclick="_anSortBy('cls')">Тип ${arrow('cls')}</th>
+          <th class="${thCls} text-left"  onclick="_anSortBy('country')">Страна ${arrow('country')}</th>
+          <th class="${thCls} text-right" onclick="_anSortBy('sess')">Сессий ${arrow('sess')}</th>
+          <th class="${thCls} text-center" onclick="_anSortBy('cred')" title="Пароль захвачен">🔑 ${arrow('cred')}</th>
+          <th class="${thCls} text-left"  onclick="_anSortBy('ts')">Время ${arrow('ts')}</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-700/40">
+        ${rows.map(e => {
+          const epoch = getEpoch(e)
     bruteforcer: 'text-red-400',
     accidental:  'text-gray-400',
     unknown:     'text-gray-600',
