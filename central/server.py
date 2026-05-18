@@ -91,6 +91,12 @@ def init_db():
             ip_count   INTEGER,
             path       TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS whitelist (
+            ip       TEXT PRIMARY KEY,
+            note     TEXT DEFAULT '',
+            added_at REAL DEFAULT (unixepoch())
+        );
         """)
 
 
@@ -260,6 +266,43 @@ async def api_del_node(node_id: str, request: Request):
         c.execute("DELETE FROM nodes WHERE id=?", (node_id,))
     return {"deleted": node_id}
 
+# ── Whitelist ─────────────────────────────────────────────────────────────────
+
+@app.get("/api/whitelist")
+async def api_get_whitelist(request: Request):
+    require_admin(request)
+    with get_db() as c:
+        rows = c.execute("SELECT ip, note, added_at FROM whitelist ORDER BY added_at DESC").fetchall()
+    return [dict(r) for r in rows]
+
+
+class WhitelistEntry(BaseModel):
+    ip:   str
+    note: str = ""
+
+
+@app.post("/api/whitelist")
+async def api_add_whitelist(entry: WhitelistEntry, request: Request):
+    require_admin(request)
+    ip = entry.ip.strip()
+    if not ip:
+        raise HTTPException(400, "IP is required")
+    with get_db() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO whitelist (ip, note) VALUES (?,?)",
+            (ip, entry.note[:200]),
+        )
+    return {"added": ip}
+
+
+@app.delete("/api/whitelist/{ip:path}")
+async def api_del_whitelist(ip: str, request: Request):
+    require_admin(request)
+    with get_db() as c:
+        c.execute("DELETE FROM whitelist WHERE ip=?", (ip,))
+    return {"removed": ip}
+
+
 # ── Submissions ────────────────────────────────────────────────────────────────
 
 @app.get("/api/submissions")
@@ -400,6 +443,7 @@ async def api_deploy_preview(request: Request):
             JOIN nodes n ON s.node_id = n.id
             WHERE s.status = 'approved'
         """).fetchall()
+        wl = {r["ip"] for r in c.execute("SELECT ip FROM whitelist").fetchall()}
 
     ips: dict[str, str] = {}
     sources: set[str] = set()
@@ -408,7 +452,7 @@ async def api_deploy_preview(request: Request):
             sources.add(row["label"])
             for line in row["blocklist"].splitlines():
                 ip = line.strip()
-                if ip and not ip.startswith("#"):
+                if ip and not ip.startswith("#") and ip not in wl:
                     ips.setdefault(ip, row["label"])
 
     return {
@@ -432,6 +476,9 @@ async def api_deploy(request: Request):
     if not rows:
         raise HTTPException(400, "No approved submissions to deploy")
 
+    with get_db() as c:
+        wl = {r["ip"] for r in c.execute("SELECT ip FROM whitelist").fetchall()}
+
     ips: dict[str, str] = {}
 
     # Seed with currently deployed IPs so we never lose previously approved addresses
@@ -439,14 +486,14 @@ async def api_deploy(request: Request):
     if existing.exists():
         for line in existing.read_text(encoding="utf-8", errors="replace").splitlines():
             ip = line.strip()
-            if ip and not ip.startswith("#"):
+            if ip and not ip.startswith("#") and ip not in wl:
                 ips.setdefault(ip, "deployed")
 
     for row in rows:
         if row["blocklist"]:
             for line in row["blocklist"].splitlines():
                 ip = line.strip()
-                if ip and not ip.startswith("#"):
+                if ip and not ip.startswith("#") and ip not in wl:
                     ips.setdefault(ip, row["label"])
 
     DEPLOY_PATH.mkdir(parents=True, exist_ok=True)

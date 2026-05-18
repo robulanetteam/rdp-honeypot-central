@@ -55,6 +55,7 @@
       <button onclick="setTab('nodes')"       id="tab-nodes"       class="tab-btn">Nodes</button>
       <button onclick="setTab('submissions')" id="tab-submissions" class="tab-btn">Submissions</button>
       <button onclick="setTab('deploy')"      id="tab-deploy"      class="tab-btn">Deploy</button>
+      <button onclick="setTab('whitelist')"   id="tab-whitelist"   class="tab-btn">Whitelist</button>
       <button onclick="setTab('settings')"    id="tab-settings"    class="tab-btn">Settings</button>
     </nav>
     <button onclick="logout()" class="text-gray-600 hover:text-gray-400 text-xs">Logout</button>
@@ -165,6 +166,32 @@
       </div><!-- /grid -->
     </div><!-- /pane-deploy -->
 
+    <!-- ── WHITELIST ───────────────────────────────────────── -->
+    <div id="pane-whitelist" class="pane hidden">
+      <div class="max-w-2xl space-y-4">
+        <div class="bg-gray-800 rounded-xl border border-gray-700 p-5">
+          <h2 class="font-bold text-orange-400 mb-1">Add to Whitelist</h2>
+          <p class="text-xs text-gray-500 mb-3">IP-адреса из whitelist исключаются из deployed блоклиста и всех публичных форматов.</p>
+          <div class="flex gap-2">
+            <input id="wl-ip" placeholder="1.2.3.4" autocomplete="off"
+              class="flex-1 bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500">
+            <input id="wl-note" placeholder="Комментарий (опционально)" autocomplete="off"
+              class="flex-1 bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500">
+            <button onclick="addWhitelist()"
+              class="bg-orange-600 hover:bg-orange-500 text-white rounded px-4 py-1.5 text-sm font-bold transition-colors whitespace-nowrap">+ Add</button>
+          </div>
+          <p id="wl-msg" class="text-xs mt-2 hidden"></p>
+        </div>
+        <div class="bg-gray-800 rounded-xl border border-gray-700 p-5">
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="font-bold text-orange-400">Whitelisted IPs</h2>
+            <span id="wl-count" class="text-xs text-gray-500"></span>
+          </div>
+          <div id="wl-list" class="divide-y divide-gray-700 text-sm">Loading…</div>
+        </div>
+      </div>
+    </div><!-- /pane-whitelist -->
+
     <!-- ── SETTINGS ──────────────────────────────────────────────────────── -->
     <div id="pane-settings" class="pane hidden">
       <div class="max-w-lg space-y-4">
@@ -257,6 +284,7 @@ function setTab(name) {
     nodes:       () => loadNodes(),
     submissions: () => loadSubs(currentSubFilter),
     deploy:      () => loadDeploy(),
+    whitelist:   () => loadWhitelist(),
     settings:    () => loadSettingsNodes(),
   };
   loaders[name]?.();
@@ -635,6 +663,50 @@ async function doDeploy() {
     btn.disabled = false;
   }
   btn.textContent = 'Deploy to Mirror';
+}
+
+// ── Whitelist ──────────────────────────────────────────────────────────────────
+
+async function loadWhitelist() {
+  const list = await api('GET', '/api/whitelist').catch(() => []);
+  const el   = document.getElementById('wl-list');
+  document.getElementById('wl-count').textContent = list.length ? `${list.length} записей` : '';
+  el.innerHTML = list.length
+    ? list.map(e => `
+        <div class="flex items-center justify-between py-2 gap-4">
+          <span class="font-mono text-white">${esc(e.ip)}</span>
+          <span class="text-gray-500 text-xs flex-1 truncate">${esc(e.note || '')}</span>
+          <span class="text-gray-600 text-xs whitespace-nowrap">${fmtTs(e.added_at)}</span>
+          <button onclick="delWhitelist('${esc(e.ip)}')"
+            class="text-red-600 hover:text-red-400 text-xs transition-colors whitespace-nowrap">Remove</button>
+        </div>`).join('')
+    : '<p class="text-gray-500 text-xs">Whitelist пуст.</p>';
+}
+
+async function addWhitelist() {
+  const ip   = document.getElementById('wl-ip').value.trim();
+  const note = document.getElementById('wl-note').value.trim();
+  const msg  = document.getElementById('wl-msg');
+  if (!ip) return;
+  try {
+    await api('POST', '/api/whitelist', { ip, note });
+    document.getElementById('wl-ip').value   = '';
+    document.getElementById('wl-note').value = '';
+    msg.textContent = `✓ ${ip} добавлен в whitelist`;
+    msg.className = 'text-xs mt-2 text-green-400';
+    msg.classList.remove('hidden');
+    setTimeout(() => msg.classList.add('hidden'), 2000);
+    loadWhitelist();
+  } catch(e) {
+    msg.textContent = '✗ ' + e.message;
+    msg.className = 'text-xs mt-2 text-red-400';
+    msg.classList.remove('hidden');
+  }
+}
+
+async function delWhitelist(ip) {
+  await api('DELETE', `/api/whitelist/${encodeURIComponent(ip)}`);
+  loadWhitelist();
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────
