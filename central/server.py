@@ -433,6 +433,15 @@ async def api_deploy(request: Request):
         raise HTTPException(400, "No approved submissions to deploy")
 
     ips: dict[str, str] = {}
+
+    # Seed with currently deployed IPs so we never lose previously approved addresses
+    existing = DEPLOY_PATH / "blocklist.txt"
+    if existing.exists():
+        for line in existing.read_text(encoding="utf-8", errors="replace").splitlines():
+            ip = line.strip()
+            if ip and not ip.startswith("#"):
+                ips.setdefault(ip, "deployed")
+
     for row in rows:
         if row["blocklist"]:
             for line in row["blocklist"].splitlines():
