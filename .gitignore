@@ -13,3 +13,20 @@ __pycache__/
 
 # OS
 .DS_Store
+
+# Large ruleset / blocklist files (not part of this repo)
+*.mmdb
+*.tar.gz
+advblock.txt
+antisocial_blacklist.txt
+binarydefense_tor.txt
+blackweb.txt
+block.txt
+easylist*.txt
+easyprivacy.txt
+erratasec.txt
+talos.txt
+last_caught_cache.txt
+snortrules-snapshot-*.tar.gz.md5
+community-rules*
+
