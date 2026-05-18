@@ -64,13 +64,16 @@ def init_db():
     with get_db() as c:
         c.executescript("""
         CREATE TABLE IF NOT EXISTS nodes (
-            id        TEXT PRIMARY KEY,
-            label     TEXT NOT NULL,
-            token     TEXT NOT NULL UNIQUE,
-            last_seen REAL,
-            last_ip   TEXT,
-            last_error TEXT,
-            created   REAL DEFAULT (unixepoch())
+            id                   TEXT PRIMARY KEY,
+            label                TEXT NOT NULL,
+            token                TEXT NOT NULL UNIQUE,
+            last_seen            REAL,
+            last_ip              TEXT,
+            last_error           TEXT,
+            auto_approve         INTEGER DEFAULT 0,
+            auto_deploy          INTEGER DEFAULT 0,
+            auto_score_threshold REAL    DEFAULT 70,
+            created              REAL DEFAULT (unixepoch())
         );
 
         CREATE TABLE IF NOT EXISTS submissions (
@@ -82,7 +85,8 @@ def init_db():
             analytics    TEXT,
             status       TEXT DEFAULT 'pending',
             reviewed_at  REAL,
-            note         TEXT
+            note         TEXT,
+            score        REAL
         );
 
         CREATE INDEX IF NOT EXISTS ix_sub_status ON submissions(status);
@@ -117,6 +121,20 @@ def init_db():
 
 
 init_db()
+
+# ── DB Migrations (safe ALTER TABLE for existing databases) ───────────────────
+for _mig in [
+    "ALTER TABLE nodes ADD COLUMN auto_approve         INTEGER DEFAULT 0",
+    "ALTER TABLE nodes ADD COLUMN auto_deploy          INTEGER DEFAULT 0",
+    "ALTER TABLE nodes ADD COLUMN auto_score_threshold REAL    DEFAULT 70",
+    "ALTER TABLE submissions ADD COLUMN score          REAL",
+]:
+    try:
+        with get_db() as _c:
+            _c.execute(_mig)
+    except sqlite3.OperationalError:
+        pass  # column already exists
+
 DEPLOY_PATH.mkdir(parents=True, exist_ok=True)
 
 # ── App ────────────────────────────────────────────────────────────────────────
@@ -165,12 +183,62 @@ def write_log(node_id: Optional[str], level: str, event: str, detail: str = ""):
         if level == "ERROR" and node_id:
             c.execute("UPDATE nodes SET last_error=? WHERE id=?", (detail[:500], node_id))
 
+def calculate_score(blocklist: str, analytics: list | None, deployed_ips: set) -> float:
+    """Quality score 0–100 used for auto-approval decisions.
+
+    Factors:
+      +30  analytics data present
+      +30  ≥20 unique IPs  |  +20  ≥5  |  +10  ≥1
+      +25  ≥50% IPs are new (not yet deployed)  |  +10  ≥20%  |  -20  <5% (near-duplicate)
+      +15  analytics density ≥5 events/IP  |  +8  ≥2
+    """
+    ips      = list({l.strip() for l in (blocklist or "").splitlines()
+                     if l.strip() and not l.startswith("#")})
+    ip_count = len(ips)
+    an_count = len(analytics or [])
+    score    = 0.0
+
+    if an_count > 0:
+        score += 30
+
+    if ip_count >= 20:
+        score += 30
+    elif ip_count >= 5:
+        score += 20
+    elif ip_count >= 1:
+        score += 10
+
+    if ip_count > 0:
+        new_count = len(set(ips) - deployed_ips) if deployed_ips else ip_count
+        new_ratio = new_count / ip_count
+        if new_ratio >= 0.5:
+            score += 25
+        elif new_ratio >= 0.2:
+            score += 10
+        elif new_ratio < 0.05 and deployed_ips:
+            score -= 20  # almost all IPs already deployed — low value
+
+    if ip_count > 0 and an_count > 0:
+        density = an_count / ip_count
+        if density >= 5:
+            score += 15
+        elif density >= 2:
+            score += 8
+
+    return round(max(0.0, min(100.0, score)), 1)
+
 # ── Models ─────────────────────────────────────────────────────────────────────
 
 class SubmitPayload(BaseModel):
     node_id:   str
     blocklist: Optional[str] = None   # raw text content of blocklist.txt
     analytics: Optional[list] = None  # list of analytics event dicts
+
+
+class NodeAutoConfig(BaseModel):
+    auto_approve:          Optional[bool]  = None
+    auto_deploy:           Optional[bool]  = None
+    auto_score_threshold:  Optional[float] = None
 
 # ── Static UI ──────────────────────────────────────────────────────────────────
 
@@ -307,7 +375,48 @@ async def api_submit(
         sub_id = cur.lastrowid
 
     write_log(node["id"], "INFO", "submit_accepted", f"sub_id={sub_id} bl={bl_count} an={an_count}")
-    return {"status": "accepted", "submission_id": sub_id}
+
+    # ── Calculate quality score ──────────────────────────────────────────────────
+    deployed_ips: set = set()
+    _dep_file = DEPLOY_PATH / "blocklist.txt"
+    if _dep_file.exists():
+        for _ln in _dep_file.read_text(encoding="utf-8", errors="replace").splitlines():
+            _ip = _ln.strip()
+            if _ip and not _ip.startswith("#"):
+                deployed_ips.add(_ip)
+
+    score = calculate_score(payload.blocklist or "", payload.analytics, deployed_ips)
+    with get_db() as c:
+        c.execute("UPDATE submissions SET score=? WHERE id=?", (score, sub_id))
+
+    # ── Auto-approve / auto-deploy ─────────────────────────────────────────────
+    auto_approve = bool(node.get("auto_approve", 0))
+    auto_deploy  = bool(node.get("auto_deploy",  0))
+    threshold    = float(node.get("auto_score_threshold") or 70)
+
+    if auto_approve and score >= threshold:
+        with get_db() as c:
+            c.execute(
+                "UPDATE submissions SET status='approved', reviewed_at=unixepoch() WHERE id=?",
+                (sub_id,),
+            )
+        write_log(node["id"], "INFO", "auto_approved",
+                  f"sub_id={sub_id} score={score} threshold={threshold}")
+        if auto_deploy:
+            try:
+                dr = _do_deploy_internal(triggered_by=node["id"])
+                return {
+                    "status":        "auto_deployed",
+                    "submission_id": sub_id,
+                    "score":         score,
+                    "deployed_ips":  dr["deployed_ips"],
+                }
+            except Exception as _e:
+                write_log(node["id"], "WARN", "auto_deploy_failed",
+                          f"sub_id={sub_id} error={str(_e)[:200]}")
+        return {"status": "auto_approved", "submission_id": sub_id, "score": score}
+
+    return {"status": "accepted", "submission_id": sub_id, "score": score}
 
 
 @app.post("/api/heartbeat")
@@ -385,6 +494,32 @@ async def api_del_node(node_id: str, request: Request):
         c.execute("DELETE FROM nodes WHERE id=?", (node_id,))
     write_log(node_id, "INFO", "node_deleted", "")
     return {"deleted": node_id}
+
+
+@app.patch("/api/nodes/{node_id}")
+async def api_update_node(node_id: str, cfg: NodeAutoConfig, request: Request):
+    """Update auto-approve / auto-deploy settings for a node."""
+    require_admin(request)
+    updates: list = []
+    values:  list = []
+    if cfg.auto_approve is not None:
+        updates.append("auto_approve=?")
+        values.append(int(cfg.auto_approve))
+    if cfg.auto_deploy is not None:
+        updates.append("auto_deploy=?")
+        values.append(int(cfg.auto_deploy))
+    if cfg.auto_score_threshold is not None:
+        t = max(0.0, min(100.0, float(cfg.auto_score_threshold)))
+        updates.append("auto_score_threshold=?")
+        values.append(t)
+    if not updates:
+        raise HTTPException(400, "Nothing to update")
+    values.append(node_id)
+    with get_db() as c:
+        c.execute(f"UPDATE nodes SET {', '.join(updates)} WHERE id=?", values)
+    write_log(node_id, "INFO", "node_config",
+              f"auto_approve={cfg.auto_approve} auto_deploy={cfg.auto_deploy} threshold={cfg.auto_score_threshold}")
+    return {"updated": node_id}
 
 
 @app.get("/api/nodes/{node_id}/ping")
@@ -488,7 +623,7 @@ async def api_get_submissions(request: Request, status: str = "pending"):
     with get_db() as c:
         rows = c.execute("""
             SELECT s.id, s.node_id, s.submitted_at, s.content_hash,
-                   s.status, s.reviewed_at, s.note,
+                   s.status, s.reviewed_at, s.note, s.score,
                    n.label AS node_label,
                    length(s.blocklist)  AS bl_size,
                    CASE WHEN s.analytics IS NOT NULL
@@ -637,8 +772,13 @@ async def api_deploy_preview(request: Request):
 
 @app.post("/api/deploy")
 async def api_deploy(request: Request):
-    """Merge all approved submissions → write blocklist.txt → mark as deployed."""
+    """Merge all approved submissions → write blocklist files → mark as deployed."""
     require_admin(request)
+    return _do_deploy_internal()
+
+
+def _do_deploy_internal(triggered_by: Optional[str] = None) -> dict:
+    """Shared deploy logic. Called from api_deploy() and auto-deploy in api_submit()."""
     with get_db() as c:
         rows = c.execute("""
             SELECT s.id, s.blocklist, n.label
@@ -718,6 +858,8 @@ async def api_deploy(request: Request):
             (json.dumps(sub_ids), len(ips), str(DEPLOY_PATH / "blocklist.txt")),
         )
 
+    write_log(triggered_by, "INFO", "deploy",
+              f"deployed_ips={len(ips)} sub_ids={sub_ids} triggered_by={triggered_by or 'admin'}")
     return {
         "deployed_ips":     len(ips),
         "files": {
