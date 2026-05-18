@@ -6,18 +6,22 @@
 
 ```
 Нода 1 ──┐
-Нода 2 ──┼──► Центральный сервер (веб-интерфейс) ──► blocklist.txt (зеркало)
+Нода 2 ──┼──► Центральный сервер (HTTPS, веб-интерфейс) ──► blocklist.txt (зеркало)
 Нода N ──┘
 ```
 
 ## Возможности
 
-- **Реестр нод** — регистрация нод, выдача уникальных токенов
-- **Статус онлайн/оффлайн** — нода считается оффлайн через 15 минут без heartbeat
-- **Проверка данных** — все входящие данные попадают в статус *pending*; перед деплоем вы одобряете или отклоняете их
-- **Объединённый деплой** — одним кликом данные от всех одобренных нод объединяются, IP дедуплицируются и записываются в файл зеркала
-- **История деплоев** — журнал всех выгрузок
-- **Docker-образ** — публикуется в `ghcr.io/robulanetteam/honeypot-central`
+- **HTTPS из коробки** — при старте контейнера автоматически генерируется самоподписанный сертификат на 10 лет; опционально — сертификат Let's Encrypt через certbot
+- **Реестр нод** — регистрация нод, выдача уникальных токенов; карточки нод показывают внешний IP, статус онлайн/оффлайн, последнюю ошибку
+- **Ping нод** — кнопка в UI отправляет ICMP ping к ноде и показывает задержку
+- **Журнал событий** — вкладка Logs с фильтрацией по ноде и уровню (INFO/WARN/ERROR)
+- **Проверка данных** — входящие данные попадают в статус *pending*; перед деплоем можно редактировать блоклист, смотреть аналитику и проверять пересечения с уже задеплоенными IP
+- **Whitelist** — IP из белого списка автоматически исключаются из всех экспортов
+- **Объединённый деплой** — IP дедуплицируются, сливаются с предыдущим деплоем и записываются в три формата: plain-text, pfBlockerNG, MikroTik RouterOS
+- **Rate limiting** — не более 5 неверных попыток входа за 5 минут; после блокировки — ожидание
+- **Статусная строка** — в шапке UI отображается IP клиента, время последнего входа и предупреждение о неудачных попытках
+- **Docker-образ** — публикуется в `ghcr.io/robulanetteam/honeypot-central` (multi-arch: amd64 + arm64)
 
 ---
 
@@ -31,10 +35,13 @@ cp .env.example .env
 nano .env          # установите ADMIN_TOKEN
 
 # подтянуть готовый образ и запустить
-IMAGE=ghcr.io/robulanetteam/honeypot-central docker compose up -d
+IMAGE=ghcr.io/robulanetteam/honeypot-central:latest docker compose up -d
 ```
 
-Веб-интерфейс доступен по адресу `http://your-server:8100`
+Веб-интерфейс доступен по адресу `https://your-server:8100`
+
+> При первом запуске в `/data/certs/` создаётся самоподписанный сертификат (RSA-4096, 10 лет).
+> Браузер покажет предупреждение — это ожидаемо для self-signed. Сертификат сохраняется в volume и переживает пересборку образа.
 
 ### Переменные окружения (`central/.env`)
 
@@ -42,6 +49,36 @@ IMAGE=ghcr.io/robulanetteam/honeypot-central docker compose up -d
 |------------|-------------|--------------|----------|
 | `ADMIN_TOKEN` | ✓ | — | Секрет для входа в веб-интерфейс |
 | `ONLINE_SECS` | | `900` | Секунд до перехода ноды в статус оффлайн |
+| `MIKROTIK_LIST_NAME` | | `honeypot-block` | Имя address-list в MikroTik RouterOS |
+| `SSL_CN` | | `honeypot-central` | CN в самоподписанном сертификате |
+| `CERTBOT_DOMAIN` | | — | Домен для получения сертификата Let's Encrypt |
+| `CERTBOT_EMAIL` | | — | Email для регистрации в Let's Encrypt |
+| `CERTBOT_STAGING` | | `0` | `1` — тестовый режим LE (без лимитов) |
+| `CERTBOT_HTTP_PORT` | | `80` | Порт для HTTP-01 challenge |
+
+### Let's Encrypt (публичный домен)
+
+Добавьте в `.env`:
+
+```env
+CERTBOT_DOMAIN=central.example.com
+CERTBOT_EMAIL=admin@example.com
+```
+
+И пробросьте порт 80 (нужен для HTTP-01 challenge) — он уже объявлен в `docker-compose.yml`.
+Сертификат будет автоматически обновляться каждые 12 часов.
+
+---
+
+## Форматы экспорта
+
+После деплоя в `./data/public/` появляются три файла, доступные по `https://your-server:8100/pub/`:
+
+| Файл | Формат | Назначение |
+|------|--------|------------|
+| `blocklist.txt` | один IP на строку | универсальный |
+| `blocklist_pfblocker.txt` | `IP/32` на строку | pfBlockerNG (pfSense/OPNsense) |
+| `blocklist_mikrotik.rsc` | `add address=IP list=…` | MikroTik RouterOS |
 
 ---
 
@@ -55,12 +92,15 @@ IMAGE=ghcr.io/robulanetteam/honeypot-central docker compose up -d
 
 ### 2. Добавьте переменные в `.env` вашего honeypot
 
-```bash
+```env
 # Дополните существующий .env файл honeypot (см. agent/.env.example)
-CENTRAL_URL=http://your-server:8100
+CENTRAL_URL=https://your-server:8100
 CENTRAL_NODE_ID=rdp-home
 CENTRAL_TOKEN=<токен из интерфейса>
 CENTRAL_DATA_DIR=/home/homeserver/rdp_honeypot/rdp_honeypot/data
+
+# Для самоподписанного сертификата:
+CENTRAL_INSECURE=1
 ```
 
 ### 3. Установите агент
@@ -78,11 +118,11 @@ sudo ENV_FILE=/path/to/.env bash agent/install.sh
 
 | Переменная | Обязательна | По умолчанию | Описание |
 |------------|-------------|--------------|----------|
-| `CENTRAL_URL` | ✓ | — | URL центрального сервера |
-| `CENTRAL_NODE_ID` | ✓ | — | Идентификатор ноды (должен совпадать с зарегистрированным в UI) |
+| `CENTRAL_URL` | ✓ | — | URL центрального сервера (`https://...`) |
+| `CENTRAL_NODE_ID` | ✓ | — | ID ноды (должен совпадать с зарегистрированным в UI) |
 | `CENTRAL_TOKEN` | ✓ | — | Токен авторизации из UI |
 | `CENTRAL_DATA_DIR` | ✓ | — | Путь к папке `data/` honeypot |
-| `CENTRAL_INSECURE` | | `0` | `1` — отключить проверку TLS-сертификата |
+| `CENTRAL_INSECURE` | | `0` | `1` — отключить проверку TLS-сертификата (для self-signed) |
 | `CENTRAL_ANALYTICS_DAYS` | | `7` | За сколько дней включать аналитику |
 
 ### Ручной запуск / отладка
@@ -105,33 +145,22 @@ journalctl -u honeypot-agent.service -n 30
 ```
 нода отправляет данные
         ↓
-  статус: pending   ← видно в UI → Submissions
+  статус: pending   ← UI → Submissions
+    ├── просмотр аналитики (страны, суbnets, учётные данные)
+    ├── проверка пересечений с задеплоенными IP
+    ├── редактирование блоклиста перед одобрением
+    └── проверка по whitelist
         ↓
   ✓ Одобрить  /  ✗ Отклонить
         ↓
   статус: approved
         ↓
-  Deploy → объединённый blocklist.txt записывается в ./central/data/public/
+  Deploy → слияние с предыдущим деплоем, дедупликация, фильтрация whitelist
         ↓
-  статус: deployed
+  статус: deployed  →  /pub/blocklist.txt  |  pfblocker  |  mikrotik.rsc
 ```
 
 ---
-
-## Сборка Docker-образа вручную
-
-```bash
-# Docker Hub
-docker login
-IMAGE=youruser/honeypot-central bash central/build-push.sh
-
-# GHCR
-docker login ghcr.io
-IMAGE=ghcr.io/youruser/honeypot-central bash central/build-push.sh
-
-# только локальная сборка (без push)
-PUSH=0 bash central/build-push.sh
-```
 
 ## CI/CD
 
@@ -143,19 +172,19 @@ PUSH=0 bash central/build-push.sh
 
 ```
 central/
-  server.py            ← бэкенд (FastAPI + SQLite)
-  static/app.html      ← одностраничный веб-интерфейс
+  server.py              ← бэкенд (FastAPI + SQLite)
+  static/app.html        ← одностраничный веб-интерфейс (тёмная тема)
   requirements.txt
   Dockerfile
   docker-compose.yml
-  build-push.sh        ← скрипт ручной сборки и публикации
+  docker-entrypoint.sh   ← генерация TLS-сертификата + запуск uvicorn
   .env.example
 agent/
-  agent.py             ← агент для honeypot-ноды
-  install.sh           ← установщик (systemd)
+  agent.py               ← агент для honeypot-ноды
+  install.sh             ← установщик (systemd)
   honeypot-agent.service
   honeypot-agent.timer
-  .env.example         ← переменные для добавления в .env honeypot
+  .env.example           ← переменные для добавления в .env honeypot
 .github/workflows/
-  docker.yml           ← GitHub Actions CI/CD
+  docker.yml             ← GitHub Actions CI/CD (multi-arch)
 ```
