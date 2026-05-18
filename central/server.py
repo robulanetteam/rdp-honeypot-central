@@ -128,6 +128,7 @@ for _mig in [
     "ALTER TABLE nodes ADD COLUMN auto_deploy          INTEGER DEFAULT 0",
     "ALTER TABLE nodes ADD COLUMN auto_score_threshold REAL    DEFAULT 70",
     "ALTER TABLE submissions ADD COLUMN score          REAL",
+    "ALTER TABLE nodes ADD COLUMN last_error           TEXT",
 ]:
     try:
         with get_db() as _c:
