@@ -1,124 +1,124 @@
 # Honeypot Central
 
-Centralized management for distributed RDP honeypot nodes.
+Централизованное управление распределёнными RDP-honeypot нодами.
 
-Each honeypot node runs a lightweight agent that periodically submits its `blocklist.txt` and analytics to the central server. You review incoming submissions in the web UI, approve them, then deploy a merged blocklist to your mirror.
+На каждой ноде работает лёгкий агент, который периодически отправляет `blocklist.txt` и аналитику на центральный сервер. В веб-интерфейсе вы проверяете входящие данные, одобряете или отклоняете их, затем одним кликом деплоите объединённый blocklist на своё зеркало.
 
 ```
-Node 1 ──┐
-Node 2 ──┼──► Central Server (web UI) ──► blocklist.txt (mirror)
-Node N ──┘
+Нода 1 ──┐
+Нода 2 ──┼──► Центральный сервер (веб-интерфейс) ──► blocklist.txt (зеркало)
+Нода N ──┘
 ```
 
-## Features
+## Возможности
 
-- **Node registry** — register nodes, get unique auth tokens
-- **Online/offline status** — nodes are marked offline after 15 min without a heartbeat
-- **Submission review** — all incoming data lands in *pending* state; you approve or reject before anything is deployed
-- **Merged deploy** — one click merges approved blocklists from all nodes, deduplicates IPs and writes the result to your mirror path
-- **Deployment history** — audit log of every deploy
-- **Docker image** — published to `ghcr.io/robulanetteam/honeypot-central`
+- **Реестр нод** — регистрация нод, выдача уникальных токенов
+- **Статус онлайн/оффлайн** — нода считается оффлайн через 15 минут без heartbeat
+- **Проверка данных** — все входящие данные попадают в статус *pending*; перед деплоем вы одобряете или отклоняете их
+- **Объединённый деплой** — одним кликом данные от всех одобренных нод объединяются, IP дедуплицируются и записываются в файл зеркала
+- **История деплоев** — журнал всех выгрузок
+- **Docker-образ** — публикуется в `ghcr.io/robulanetteam/honeypot-central`
 
 ---
 
-## Quick start — Central Server
+## Быстрый старт — Центральный сервер
 
 ```bash
 git clone https://github.com/robulanetteam/rdp-honeypot-central
 cd rdp-honeypot-central/central
 
 cp .env.example .env
-nano .env          # set ADMIN_TOKEN
+nano .env          # установите ADMIN_TOKEN
 
-# pull pre-built image and start
+# подтянуть готовый образ и запустить
 IMAGE=ghcr.io/robulanetteam/honeypot-central docker compose up -d
 ```
 
-Web UI available at `http://your-server:8100`
+Веб-интерфейс доступен по адресу `http://your-server:8100`
 
-### Environment variables (`central/.env`)
+### Переменные окружения (`central/.env`)
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `ADMIN_TOKEN` | ✓ | — | Secret for web UI login |
-| `ONLINE_SECS` | | `900` | Seconds before a node is considered offline |
+| Переменная | Обязательна | По умолчанию | Описание |
+|------------|-------------|--------------|----------|
+| `ADMIN_TOKEN` | ✓ | — | Секрет для входа в веб-интерфейс |
+| `ONLINE_SECS` | | `900` | Секунд до перехода ноды в статус оффлайн |
 
 ---
 
-## Agent — install on each honeypot node
+## Агент — установка на каждой ноде
 
-The agent reads `blocklist.txt` and `analytics.jsonl` from the honeypot data directory and submits them to the central server every 15 minutes via a systemd timer.
+Агент читает `blocklist.txt` и `analytics.jsonl` из папки данных honeypot и каждые 15 минут отправляет их на центральный сервер через systemd-таймер.
 
-### 1. Register the node in the UI
+### 1. Зарегистрируйте ноду в интерфейсе
 
-Open the web UI → **Settings** → **Register New Node** → enter a node ID and label → copy the generated token.
+Откройте веб-интерфейс → **Settings** → **Register New Node** → введите ID и метку ноды → скопируйте выданный токен.
 
-### 2. Add variables to your honeypot `.env`
+### 2. Добавьте переменные в `.env` вашего honeypot
 
 ```bash
-# Append to your existing honeypot .env (see agent/.env.example)
+# Дополните существующий .env файл honeypot (см. agent/.env.example)
 CENTRAL_URL=http://your-server:8100
 CENTRAL_NODE_ID=rdp-home
-CENTRAL_TOKEN=<token from UI>
+CENTRAL_TOKEN=<токен из интерфейса>
 CENTRAL_DATA_DIR=/home/homeserver/rdp_honeypot/rdp_honeypot/data
 ```
 
-### 3. Install
+### 3. Установите агент
 
 ```bash
-# copy agent/ to the node, then:
+# скопируйте папку agent/ на ноду, затем:
 sudo bash agent/install.sh
-# installer auto-detects .env location, or:
+# установщик автоматически найдёт .env, или укажите путь явно:
 sudo ENV_FILE=/path/to/.env bash agent/install.sh
 ```
 
-This installs `/opt/honeypot-agent/agent.py` and a systemd timer that runs every 15 minutes.
+Устанавливает `/opt/honeypot-agent/agent.py` и systemd-таймер с запуском каждые 15 минут.
 
-### Agent environment variables
+### Переменные окружения агента
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `CENTRAL_URL` | ✓ | — | URL of the central server |
-| `CENTRAL_NODE_ID` | ✓ | — | Node identifier (must match the one registered in UI) |
-| `CENTRAL_TOKEN` | ✓ | — | Auth token from the UI |
-| `CENTRAL_DATA_DIR` | ✓ | — | Path to honeypot `data/` directory |
-| `CENTRAL_INSECURE` | | `0` | Set to `1` to skip TLS verification |
-| `CENTRAL_ANALYTICS_DAYS` | | `7` | How many days of analytics to include |
+| Переменная | Обязательна | По умолчанию | Описание |
+|------------|-------------|--------------|----------|
+| `CENTRAL_URL` | ✓ | — | URL центрального сервера |
+| `CENTRAL_NODE_ID` | ✓ | — | Идентификатор ноды (должен совпадать с зарегистрированным в UI) |
+| `CENTRAL_TOKEN` | ✓ | — | Токен авторизации из UI |
+| `CENTRAL_DATA_DIR` | ✓ | — | Путь к папке `data/` honeypot |
+| `CENTRAL_INSECURE` | | `0` | `1` — отключить проверку TLS-сертификата |
+| `CENTRAL_ANALYTICS_DAYS` | | `7` | За сколько дней включать аналитику |
 
-### Manual run / test
+### Ручной запуск / отладка
 
 ```bash
 python3 /opt/honeypot-agent/agent.py
 
-# heartbeat only (no data upload):
+# только heartbeat (без загрузки данных):
 python3 /opt/honeypot-agent/agent.py --heartbeat
 
-# check timer:
+# статус таймера:
 systemctl status honeypot-agent.timer
 journalctl -u honeypot-agent.service -n 30
 ```
 
 ---
 
-## Review workflow
+## Рабочий процесс проверки
 
 ```
-node submits data
-      ↓
-  status: pending   ← visible in UI → Submissions
-      ↓
-  ✓ Approve  /  ✗ Reject
-      ↓
-  status: approved
-      ↓
-  Deploy → merged blocklist.txt written to ./central/data/public/
-      ↓
-  status: deployed
+нода отправляет данные
+        ↓
+  статус: pending   ← видно в UI → Submissions
+        ↓
+  ✓ Одобрить  /  ✗ Отклонить
+        ↓
+  статус: approved
+        ↓
+  Deploy → объединённый blocklist.txt записывается в ./central/data/public/
+        ↓
+  статус: deployed
 ```
 
 ---
 
-## Build Docker image manually
+## Сборка Docker-образа вручную
 
 ```bash
 # Docker Hub
@@ -129,33 +129,33 @@ IMAGE=youruser/honeypot-central bash central/build-push.sh
 docker login ghcr.io
 IMAGE=ghcr.io/youruser/honeypot-central bash central/build-push.sh
 
-# local build only (no push)
+# только локальная сборка (без push)
 PUSH=0 bash central/build-push.sh
 ```
 
 ## CI/CD
 
-Every push to `main` and every version tag (`v*`) triggers `.github/workflows/docker.yml` which builds a multi-arch image (`linux/amd64` + `linux/arm64`) and pushes it to `ghcr.io/robulanetteam/honeypot-central`.
+Каждый push в `main` и каждый тег версии (`v*`) запускает `.github/workflows/docker.yml`, который собирает multi-arch образ (`linux/amd64` + `linux/arm64`) и публикует его в `ghcr.io/robulanetteam/honeypot-central`.
 
 ---
 
-## Repository layout
+## Структура репозитория
 
 ```
 central/
-  server.py            ← FastAPI + SQLite backend
-  static/app.html      ← single-page web UI
+  server.py            ← бэкенд (FastAPI + SQLite)
+  static/app.html      ← одностраничный веб-интерфейс
   requirements.txt
   Dockerfile
   docker-compose.yml
-  build-push.sh        ← manual build & push helper
+  build-push.sh        ← скрипт ручной сборки и публикации
   .env.example
 agent/
-  agent.py             ← honeypot node agent
-  install.sh           ← systemd installer
+  agent.py             ← агент для honeypot-ноды
+  install.sh           ← установщик (systemd)
   honeypot-agent.service
   honeypot-agent.timer
-  .env.example         ← variables to add to honeypot .env
+  .env.example         ← переменные для добавления в .env honeypot
 .github/workflows/
   docker.yml           ← GitHub Actions CI/CD
 ```
