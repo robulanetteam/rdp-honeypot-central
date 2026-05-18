@@ -20,6 +20,8 @@ import os
 import secrets
 import sqlite3
 import time
+import asyncio
+import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
@@ -66,6 +68,7 @@ def init_db():
             token     TEXT NOT NULL UNIQUE,
             last_seen REAL,
             last_ip   TEXT,
+            last_error TEXT,
             created   REAL DEFAULT (unixepoch())
         );
 
@@ -97,6 +100,18 @@ def init_db():
             note     TEXT DEFAULT '',
             added_at REAL DEFAULT (unixepoch())
         );
+
+        CREATE TABLE IF NOT EXISTS logs (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts         REAL DEFAULT (unixepoch()),
+            node_id    TEXT,
+            level      TEXT DEFAULT 'INFO',
+            event      TEXT,
+            detail     TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS ix_logs_ts      ON logs(ts DESC);
+        CREATE INDEX IF NOT EXISTS ix_logs_node    ON logs(node_id);
         """)
 
 
@@ -125,6 +140,16 @@ def node_from_token(token: str) -> dict:
         raise HTTPException(403, "Unknown node token")
     return dict(row)
 
+
+def write_log(node_id: Optional[str], level: str, event: str, detail: str = ""):
+    with get_db() as c:
+        c.execute(
+            "INSERT INTO logs (node_id, level, event, detail) VALUES (?,?,?,?)",
+            (node_id, level, event, detail[:2000]),
+        )
+        if level == "ERROR" and node_id:
+            c.execute("UPDATE nodes SET last_error=? WHERE id=?", (detail[:500], node_id))
+
 # ── Models ─────────────────────────────────────────────────────────────────────
 
 class SubmitPayload(BaseModel):
@@ -151,6 +176,7 @@ async def api_submit(
     """Honeypot node submits its current blocklist + analytics."""
     node = node_from_token(x_node_token)
     if node["id"] != payload.node_id:
+        write_log(payload.node_id, "ERROR", "submit_rejected", "Token/node_id mismatch")
         raise HTTPException(403, "Token/node_id mismatch")
 
     content_hash = hashlib.sha256(
@@ -160,10 +186,13 @@ async def api_submit(
         ).encode()
     ).hexdigest()
 
+    bl_count = len([l for l in (payload.blocklist or "").splitlines() if l.strip() and not l.startswith("#")])
+    an_count = len(payload.analytics or [])
+
     with get_db() as c:
-        # Update heartbeat
+        # Update heartbeat + clear last_error on successful contact
         c.execute(
-            "UPDATE nodes SET last_seen=unixepoch(), last_ip=? WHERE id=?",
+            "UPDATE nodes SET last_seen=unixepoch(), last_ip=?, last_error=NULL WHERE id=?",
             (request.client.host, node["id"]),
         )
 
@@ -175,6 +204,7 @@ async def api_submit(
             (node["id"], content_hash),
         ).fetchone()
         if dup:
+            write_log(node["id"], "INFO", "submit_duplicate", f"sub_id={dup['id']} bl={bl_count} an={an_count}")
             return {"status": "duplicate", "submission_id": dup["id"]}
 
         cur = c.execute(
@@ -190,6 +220,7 @@ async def api_submit(
         )
         sub_id = cur.lastrowid
 
+    write_log(node["id"], "INFO", "submit_accepted", f"sub_id={sub_id} bl={bl_count} an={an_count}")
     return {"status": "accepted", "submission_id": sub_id}
 
 
@@ -202,9 +233,10 @@ async def api_heartbeat(
     node = node_from_token(x_node_token)
     with get_db() as c:
         c.execute(
-            "UPDATE nodes SET last_seen=unixepoch(), last_ip=? WHERE id=?",
+            "UPDATE nodes SET last_seen=unixepoch(), last_ip=?, last_error=NULL WHERE id=?",
             (request.client.host, node["id"]),
         )
+    write_log(node["id"], "INFO", "heartbeat", f"ip={request.client.host}")
     return {"ok": True}
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -256,6 +288,7 @@ async def api_add_node(request: Request):
     except sqlite3.IntegrityError:
         raise HTTPException(409, "Node ID already exists")
 
+    write_log(node_id, "INFO", "node_registered", f"label={label}")
     return {"node_id": node_id, "token": token}
 
 
@@ -264,7 +297,62 @@ async def api_del_node(node_id: str, request: Request):
     require_admin(request)
     with get_db() as c:
         c.execute("DELETE FROM nodes WHERE id=?", (node_id,))
+    write_log(node_id, "INFO", "node_deleted", "")
     return {"deleted": node_id}
+
+
+@app.get("/api/nodes/{node_id}/ping")
+async def api_ping_node(node_id: str, request: Request):
+    """Ping the node's last known IP and return latency."""
+    require_admin(request)
+    with get_db() as c:
+        row = c.execute("SELECT last_ip FROM nodes WHERE id=?", (node_id,)).fetchone()
+    if not row or not row["last_ip"]:
+        raise HTTPException(404, "No IP known for this node")
+    ip = row["last_ip"]
+    try:
+        t0 = time.monotonic()
+        proc = await asyncio.create_subprocess_exec(
+            "ping", "-c", "3", "-W", "2", ip,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        elapsed = time.monotonic() - t0
+        output = stdout.decode(errors="replace")
+        reachable = proc.returncode == 0
+        # parse avg rtt from ping output e.g. "rtt min/avg/max/mdev = 1.2/2.3/3.4/0.5 ms"
+        avg_ms = None
+        for line in output.splitlines():
+            if "avg" in line and "=" in line:
+                try:
+                    avg_ms = float(line.split("=")[1].strip().split("/")[1])
+                except Exception:
+                    pass
+        write_log(node_id, "INFO", "ping", f"ip={ip} reachable={reachable} avg_ms={avg_ms}")
+        return {"ip": ip, "reachable": reachable, "avg_ms": avg_ms, "output": output}
+    except asyncio.TimeoutError:
+        write_log(node_id, "WARN", "ping_timeout", f"ip={ip}")
+        return {"ip": ip, "reachable": False, "avg_ms": None, "output": "Timeout"}
+
+
+# ── Logs ───────────────────────────────────────────────────────────────────────
+
+@app.get("/api/logs")
+async def api_get_logs(request: Request, node_id: str = "", limit: int = 200):
+    require_admin(request)
+    limit = min(limit, 1000)
+    with get_db() as c:
+        if node_id:
+            rows = c.execute(
+                "SELECT * FROM logs WHERE node_id=? ORDER BY ts DESC LIMIT ?",
+                (node_id, limit),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                "SELECT * FROM logs ORDER BY ts DESC LIMIT ?", (limit,)
+            ).fetchall()
+    return [dict(r) for r in rows]
 
 # ── Whitelist ─────────────────────────────────────────────────────────────────
 

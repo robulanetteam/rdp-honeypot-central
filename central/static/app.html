@@ -56,6 +56,7 @@
       <button onclick="setTab('submissions')" id="tab-submissions" class="tab-btn">Submissions</button>
       <button onclick="setTab('deploy')"      id="tab-deploy"      class="tab-btn">Deploy</button>
       <button onclick="setTab('whitelist')"   id="tab-whitelist"   class="tab-btn">Whitelist</button>
+      <button onclick="setTab('logs')"        id="tab-logs"        class="tab-btn">Logs</button>
       <button onclick="setTab('settings')"    id="tab-settings"    class="tab-btn">Settings</button>
     </nav>
     <button onclick="logout()" class="text-gray-600 hover:text-gray-400 text-xs">Logout</button>
@@ -192,6 +193,28 @@
       </div>
     </div><!-- /pane-whitelist -->
 
+    <!-- ── LOGS ──────────────────────────────────────────────────────────── -->
+    <div id="pane-logs" class="pane hidden">
+      <div class="flex items-center gap-3 mb-4 flex-wrap">
+        <select id="logs-node-filter" onchange="loadLogs()"
+          class="bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-orange-500">
+          <option value="">Все ноды</option>
+        </select>
+        <select id="logs-level-filter" onchange="loadLogs()"
+          class="bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-orange-500">
+          <option value="">Все уровни</option>
+          <option value="INFO">INFO</option>
+          <option value="WARN">WARN</option>
+          <option value="ERROR">ERROR</option>
+        </select>
+        <button onclick="loadLogs()" class="text-xs text-gray-500 hover:text-gray-300">↺ Обновить</button>
+        <span id="logs-count" class="ml-auto text-xs text-gray-600"></span>
+      </div>
+      <div class="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
+        <div id="logs-table" class="text-xs font-mono overflow-x-auto"></div>
+      </div>
+    </div><!-- /pane-logs -->
+
     <!-- ── SETTINGS ──────────────────────────────────────────────────────── -->
     <div id="pane-settings" class="pane hidden">
       <div class="max-w-lg space-y-4">
@@ -285,6 +308,7 @@ function setTab(name) {
     submissions: () => loadSubs(currentSubFilter),
     deploy:      () => loadDeploy(),
     whitelist:   () => loadWhitelist(),
+    logs:        () => loadLogs(),
     settings:    () => loadSettingsNodes(),
   };
   loaders[name]?.();
@@ -332,8 +356,8 @@ async function loadNodes() {
           <span class="text-gray-200">${n.last_seen ? fmtAgo(n.last_seen_ago) : 'never'}</span>
         </div>
         <div class="flex justify-between">
-          <span>Last IP</span>
-          <span class="text-gray-200">${esc(n.last_ip || '—')}</span>
+          <span>External IP</span>
+          <span class="text-gray-200 font-mono">${esc(n.last_ip || '—')}</span>
         </div>
         <div class="flex justify-between border-t border-gray-700 pt-1 mt-1">
           <span>Pending</span>
@@ -343,7 +367,23 @@ async function loadNodes() {
           <span>Approved</span>
           <span class="text-green-400">${n.approved_count ?? 0}</span>
         </div>
+        ${n.last_error ? `
+        <div class="border-t border-gray-700 pt-1 mt-1">
+          <p class="text-red-400 font-bold text-xs">⚠ Last error</p>
+          <p class="text-red-300 text-xs break-all mt-0.5">${esc(n.last_error)}</p>
+        </div>` : ''}
       </div>
+      <div class="mt-3 flex gap-2">
+        <button onclick="pingNode('${esc(n.id)}', '${esc(n.last_ip || '')}', this)"
+          class="flex-1 bg-gray-700 hover:bg-gray-600 rounded px-2 py-1 text-xs transition-colors">
+          Ping
+        </button>
+        <button onclick="setTab('logs'); filterLogs('${esc(n.id)}')"
+          class="flex-1 bg-gray-700 hover:bg-gray-600 rounded px-2 py-1 text-xs transition-colors">
+          Logs
+        </button>
+      </div>
+      <div id="ping-result-${esc(n.id)}" class="hidden mt-2 text-xs bg-gray-900 rounded p-2"></div>
     </div>
   `).join('');
 }
@@ -663,6 +703,92 @@ async function doDeploy() {
     btn.disabled = false;
   }
   btn.textContent = 'Deploy to Mirror';
+}
+
+// ── Ping ───────────────────────────────────────────────────────────────────────
+
+async function pingNode(nodeId, ip, btn) {
+  if (!ip) { alert('IP-адрес ноды неизвестен'); return; }
+  const el = document.getElementById(`ping-result-${nodeId}`);
+  btn.textContent = 'Pinging…';
+  btn.disabled = true;
+  el.classList.remove('hidden');
+  el.innerHTML = '<span class="text-gray-500">Ожидание ответа…</span>';
+  try {
+    const r = await api('GET', `/api/nodes/${encodeURIComponent(nodeId)}/ping`);
+    if (r.reachable) {
+      el.innerHTML = `<span class="text-green-400 font-bold">✓ Доступен</span>  <span class="text-gray-400">IP: ${esc(r.ip)}</span>  <span class="text-gray-300">avg: ${r.avg_ms != null ? r.avg_ms.toFixed(1) + ' ms' : '—'}</span>`;
+    } else {
+      el.innerHTML = `<span class="text-red-400 font-bold">✗ Недоступен</span>  <span class="text-gray-500">${esc(r.ip)}</span>`;
+    }
+  } catch(e) {
+    el.innerHTML = `<span class="text-red-400">${esc(e.message)}</span>`;
+  }
+  btn.textContent = 'Ping';
+  btn.disabled = false;
+}
+
+// ── Logs ───────────────────────────────────────────────────────────────────────
+
+let logsNodeFilter = '';
+
+async function filterLogs(nodeId) {
+  logsNodeFilter = nodeId;
+  const sel = document.getElementById('logs-node-filter');
+  if (sel) sel.value = nodeId;
+  await loadLogs();
+}
+
+async function loadLogs() {
+  const nodeId = document.getElementById('logs-node-filter')?.value || logsNodeFilter;
+  const level  = document.getElementById('logs-level-filter')?.value || '';
+  const qs = new URLSearchParams();
+  if (nodeId) qs.set('node_id', nodeId);
+  const rows = await api('GET', `/api/logs?${qs}`).catch(() => []);
+
+  // Populate node filter select on first load
+  const sel = document.getElementById('logs-node-filter');
+  if (sel && sel.options.length <= 1) {
+    const nodes = await api('GET', '/api/nodes').catch(() => []);
+    nodes.forEach(n => {
+      const opt = document.createElement('option');
+      opt.value = n.id; opt.textContent = n.label;
+      if (n.id === nodeId) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  }
+
+  const filtered = level ? rows.filter(r => r.level === level) : rows;
+  document.getElementById('logs-count').textContent = `${filtered.length} записей`;
+
+  const el = document.getElementById('logs-table');
+  if (!filtered.length) {
+    el.innerHTML = '<p class="text-gray-500 p-4">Нет записей.</p>';
+    return;
+  }
+
+  const lvlClass = { INFO: 'text-gray-400', WARN: 'text-yellow-400', ERROR: 'text-red-400' };
+  el.innerHTML = `<table class="w-full">
+    <thead class="text-gray-600 border-b border-gray-700">
+      <tr>
+        <th class="px-3 py-2 text-left w-36">Время</th>
+        <th class="px-3 py-2 text-left w-28">Нода</th>
+        <th class="px-3 py-2 text-left w-16">Уровень</th>
+        <th class="px-3 py-2 text-left w-36">Событие</th>
+        <th class="px-3 py-2 text-left">Детали</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-700/50">
+      ${filtered.map(r => `
+        <tr class="hover:bg-gray-700/30">
+          <td class="px-3 py-1.5 text-gray-500 whitespace-nowrap">${fmtTs(r.ts)}</td>
+          <td class="px-3 py-1.5 text-gray-300 whitespace-nowrap">${esc(r.node_id || '—')}</td>
+          <td class="px-3 py-1.5 font-bold ${lvlClass[r.level] || 'text-gray-400'}">${esc(r.level)}</td>
+          <td class="px-3 py-1.5 text-gray-300 whitespace-nowrap">${esc(r.event)}</td>
+          <td class="px-3 py-1.5 text-gray-500 break-all">${esc(r.detail || '')}</td>
+        </tr>`).join('')}
+    </tbody>
+  </table>`;
 }
 
 // ── Whitelist ──────────────────────────────────────────────────────────────────
