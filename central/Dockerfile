@@ -2,10 +2,11 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install system deps: openssl (self-signed) + certbot (Let's Encrypt)
+# Install system deps: openssl (self-signed) + certbot (Let's Encrypt) + ping
 RUN apt-get update && apt-get install -y --no-install-recommends \
         openssl \
         certbot \
+        iputils-ping \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
