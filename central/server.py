@@ -732,11 +732,13 @@ async def api_overlap(sub_id: int, request: Request):
         if ov:
             overlapping.append({"id": o["id"], "node_label": o["node_label"], "overlap": ov})
 
+    new_ip_set = sub_ips - deployed_ips
     return {
         "total_ips":        len(sub_ips),
         "deployed_total":   len(deployed_ips),
         "deployed_overlap": len(sub_ips & deployed_ips),
-        "new_ips":          len(sub_ips - deployed_ips),
+        "new_ips":          len(new_ip_set),
+        "new_ip_list":      sorted(new_ip_set),
         "other_submissions": overlapping,
     }
 

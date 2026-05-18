@@ -112,6 +112,7 @@
             <textarea id="detail-bl"
               class="w-full h-72 bg-gray-900 text-green-400 text-xs p-3 rounded border border-gray-700 font-mono resize-none focus:outline-none"
               readonly spellcheck="false"></textarea>
+            <div id="detail-deployed-ips" class="hidden mt-2"></div>
           </div>
           <div>
             <p class="text-xs text-gray-500 mb-1 flex justify-between">
@@ -548,7 +549,10 @@ async function loadSubs(status) {
 }
 
 async function showDetail(id) {
-  const s = await api('GET', `/api/submissions/${id}`).catch(e => { alert(e); });
+  const [s, ov] = await Promise.all([
+    api('GET', `/api/submissions/${id}`).catch(e => { alert(e); return null; }),
+    api('GET', `/api/submissions/${id}/overlap`).catch(() => null),
+  ]);
   if (!s) return;
 
   currentDetailId = s.id;
@@ -561,20 +565,41 @@ async function showDetail(id) {
     <div><span class="text-gray-600">Status</span><br><span class="badge-${s.status} px-2 py-0.5 rounded">${s.status}</span></div>
     <div><span class="text-gray-600">Hash</span><br><span class="text-gray-500">${s.content_hash.slice(0,16)}…</span></div>`;
 
-  // Blocklist
-  const ips = s.blocklist
+  // All IPs from submission
+  const allIps = s.blocklist
     ? s.blocklist.split('\n').filter(l => l.trim() && !l.startsWith('#'))
     : [];
-  document.getElementById('detail-bl-count').textContent = `${ips.length} IPs`;
-  const blTa = document.getElementById('detail-bl');
-  blTa.value = s.blocklist || '';
+
+  // Split view: for pending submissions with already-deployed IPs
+  const hasSplit = s.status === 'pending' && ov && ov.deployed_overlap > 0 && Array.isArray(ov.new_ip_list);
+  const newIpList = hasSplit ? ov.new_ip_list : allIps;
+
+  // Blocklist count label
+  const blCountEl = document.getElementById('detail-bl-count');
+  if (hasSplit) {
+    blCountEl.innerHTML =
+      `<span class="text-green-400 font-bold">${newIpList.length} новых</span>` +
+      (ov.deployed_overlap ? ` <span class="text-gray-600">+ ${ov.deployed_overlap} в deployment</span>` : '');
+  } else {
+    blCountEl.textContent = `${allIps.length} IPs`;
+  }
+
+  // Blocklist textarea — show only new IPs for pending+split, all otherwise
+  const blTa  = document.getElementById('detail-bl');
   const saveBtn = document.getElementById('bl-save-btn');
+  blTa.value = hasSplit ? newIpList.join('\n') : (s.blocklist || '');
+
   if (s.status === 'pending') {
     blTa.removeAttribute('readonly');
     blTa.classList.add('border-orange-700');
     blTa.oninput = () => {
       const cnt = blTa.value.split('\n').filter(l => l.trim() && !l.startsWith('#')).length;
-      document.getElementById('detail-bl-count').textContent = `${cnt} IPs`;
+      if (hasSplit) {
+        blCountEl.innerHTML = `<span class="text-green-400 font-bold">${cnt} новых</span>` +
+          (ov.deployed_overlap ? ` <span class="text-gray-600">+ ${ov.deployed_overlap} в deployment</span>` : '');
+      } else {
+        blCountEl.textContent = `${cnt} IPs`;
+      }
     };
     saveBtn.classList.remove('hidden');
   } else {
@@ -582,6 +607,25 @@ async function showDetail(id) {
     blTa.classList.remove('border-orange-700');
     blTa.oninput = null;
     saveBtn.classList.add('hidden');
+  }
+
+  // Collapsed section: already-deployed IPs
+  const deployedEl = document.getElementById('detail-deployed-ips');
+  if (hasSplit && ov.deployed_overlap > 0) {
+    const newSet = new Set(ov.new_ip_list);
+    const deployedIps = allIps.filter(ip => !newSet.has(ip));
+    deployedEl.innerHTML = `
+      <button onclick="toggleDeployedIps(this)" class="text-xs text-gray-600 hover:text-gray-400 flex items-center gap-1">
+        <span class="deployed-icon">▶</span>
+        <span>${deployedIps.length} IP уже задеплоены (скрыты)</span>
+      </button>
+      <div class="deployed-list hidden mt-1 max-h-28 overflow-y-auto bg-gray-900/50 rounded p-2 border border-gray-700/40">
+        ${deployedIps.map(ip => `<div class="text-gray-600 text-xs font-mono">${esc(ip)}</div>`).join('')}
+      </div>`;
+    deployedEl.classList.remove('hidden');
+  } else {
+    deployedEl.innerHTML = '';
+    deployedEl.classList.add('hidden');
   }
 
   // Analytics
@@ -608,13 +652,22 @@ async function showDetail(id) {
 
   // Analytics stats
   renderAnalyticsStats(analytics);
-  // Overlap check (async, pending only)
+
+  // Overlap info bar (use pre-fetched data)
   const ovEl = document.getElementById('detail-overlap');
   ovEl.innerHTML = '';
   ovEl.classList.add('hidden');
-  if (s.status === 'pending') renderOverlap(s.id);
+  if (s.status === 'pending' && ov) renderOverlapBanner(ov);
 
   document.getElementById('sub-detail').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function toggleDeployedIps(btn) {
+  const list = btn.nextElementSibling;
+  const icon = btn.querySelector('.deployed-icon');
+  if (!list) return;
+  list.classList.toggle('hidden');
+  if (icon) icon.textContent = list.classList.contains('hidden') ? '▶' : '▼';
 }
 
 function closeDetail() {
@@ -708,17 +761,14 @@ function renderAnalyticsStats(events) {
     </div>`;
 }
 
-async function renderOverlap(subId) {
+function renderOverlapBanner(ov) {
   const el = document.getElementById('detail-overlap');
-  const ov = await api('GET', `/api/submissions/${subId}/overlap`).catch(() => null);
-  if (!ov) return;
-
   const warnings = [];
   if (ov.deployed_overlap > 0) {
     const pct = Math.round(ov.deployed_overlap / ov.total_ips * 100);
     warnings.push(`<span class="font-bold text-yellow-300">${ov.deployed_overlap}</span> из ${ov.total_ips} IP уже в deployed блоклисте (${pct}%)`);
   }
-  for (const o of ov.other_submissions) {
+  for (const o of ov.other_submissions || []) {
     warnings.push(`<span class="font-bold text-orange-300">${o.overlap}</span> IP пересекаются с Submission #${o.id} (${esc(o.node_label)})`);
   }
 
