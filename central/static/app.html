@@ -39,6 +39,7 @@
       Login
     </button>
     <p id="login-err" class="text-red-400 text-xs mt-2 text-center hidden">Invalid token</p>
+    <p id="login-locked" class="text-yellow-400 text-xs mt-2 text-center hidden"></p>
   </div>
 </div>
 
@@ -59,7 +60,10 @@
       <button onclick="setTab('logs')"        id="tab-logs"        class="tab-btn">Logs</button>
       <button onclick="setTab('settings')"    id="tab-settings"    class="tab-btn">Settings</button>
     </nav>
-    <button onclick="logout()" class="text-gray-600 hover:text-gray-400 text-xs">Logout</button>
+    <div class="flex items-center gap-3">
+      <span id="header-status" class="text-xs text-gray-600 hidden"></span>
+      <button onclick="logout()" class="text-gray-600 hover:text-gray-400 text-xs">Logout</button>
+    </div>
   </header>
 
   <!-- Content -->
@@ -263,13 +267,34 @@ let currentDetailId = null;
 async function doLogin() {
   const tok = document.getElementById('token-input').value.trim();
   if (!tok) return;
-  const r = await fetch('/api/nodes', { headers: { 'x-admin-token': tok } });
-  if (r.ok) {
-    ADMIN_TOKEN = tok;
-    localStorage.setItem('admin_token', tok);
-    showApp();
-  } else {
-    document.getElementById('login-err').classList.remove('hidden');
+  const errEl    = document.getElementById('login-err');
+  const lockEl   = document.getElementById('login-locked');
+  errEl.classList.add('hidden');
+  lockEl.classList.add('hidden');
+  try {
+    const r = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: tok }),
+    });
+    if (r.ok) {
+      ADMIN_TOKEN = tok;
+      localStorage.setItem('admin_token', tok);
+      showApp();
+    } else {
+      const data = await r.json().catch(() => ({}));
+      const msg  = data.detail || 'Invalid token';
+      if (r.status === 429) {
+        lockEl.textContent = '⚠ ' + msg;
+        lockEl.classList.remove('hidden');
+      } else {
+        errEl.textContent = msg;
+        errEl.classList.remove('hidden');
+      }
+    }
+  } catch(e) {
+    errEl.textContent = e.message;
+    errEl.classList.remove('hidden');
   }
 }
 
@@ -277,6 +302,46 @@ function showApp() {
   document.getElementById('login').classList.add('hidden');
   document.getElementById('app').classList.remove('hidden');
   setTab('nodes');
+  loadAuthStatus();
+}
+
+async function loadAuthStatus() {
+  const s = await api('GET', '/api/auth/status').catch(() => null);
+  if (!s) return;
+  const el = document.getElementById('header-status');
+  el.classList.remove('hidden');
+  el.textContent = `• IP: ${s.client_ip}`;
+  if (s.last_login) {
+    el.textContent += `  • Last login: ${fmtTs(s.last_login.ts)} from ${s.last_login.ip}`;
+  }
+  if (s.failed_ips.length > 0 || s.blocked_ips.length > 0) {
+    el.classList.add('text-yellow-500');
+    const totalFails = s.failed_ips.reduce((a, x) => a + x.count, 0);
+    el.textContent += `  ⚠ ${totalFails} failed login attempt(s)`;
+    showAuthWarning(s);
+  } else {
+    el.classList.remove('text-yellow-500');
+  }
+}
+
+function showAuthWarning(s) {
+  if (!s.failed_ips.length && !s.blocked_ips.length) return;
+  const banner = document.createElement('div');
+  banner.className = 'fixed top-14 right-4 z-50 bg-yellow-900/90 border border-yellow-600 rounded-xl p-4 text-xs max-w-sm shadow-2xl';
+  let html = '<p class="font-bold text-yellow-300 mb-2">⚠ Попытки неверного входа</p>';
+  for (const f of s.failed_ips) {
+    html += `<div class="flex justify-between gap-4 py-0.5"><span class="font-mono text-yellow-200">${esc(f.ip)}</span><span class="text-yellow-500">${f.count}×  ${fmtTs(f.last_ts)}</span></div>`;
+  }
+  if (s.blocked_ips.length) {
+    html += '<p class="font-bold text-red-300 mt-2 mb-1">🔒 Заблокировано</p>';
+    for (const b of s.blocked_ips) {
+      html += `<div class="font-mono text-red-300">${esc(b.ip)}</div>`;
+    }
+  }
+  html += '<button onclick="this.parentNode.remove()" class="mt-3 text-yellow-600 hover:text-yellow-400">✕ Закрыть</button>';
+  banner.innerHTML = html;
+  document.body.appendChild(banner);
+  setTimeout(() => banner.remove(), 15000);
 }
 
 function logout() {

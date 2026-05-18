@@ -22,6 +22,7 @@ import sqlite3
 import time
 import asyncio
 import subprocess
+from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
@@ -124,7 +125,21 @@ app = FastAPI(title="Honeypot Central", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=str(STATIC_PATH)), name="static")
 app.mount("/pub",    StaticFiles(directory=str(DEPLOY_PATH)), name="public")
 
+# ── Auth state ────────────────────────────────────────────────────────────────
+# In-memory rate limiting: ip -> list of failure timestamps
+_fail_times: dict = defaultdict(list)
+RATE_WINDOW   = 300   # seconds
+RATE_MAX_FAIL = 5     # max failures per window before lockout
+
+# Track last successful admin login
+_last_admin_login: dict = {}   # {"ip": ..., "ts": ...}
+
 # ── Auth ───────────────────────────────────────────────────────────────────────
+
+def _client_ip(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for", "")
+    return xff.split(",")[0].strip() if xff else (request.client.host or "unknown")
+
 
 def require_admin(request: Request):
     tok = (request.headers.get("x-admin-token") or
@@ -162,6 +177,77 @@ class SubmitPayload(BaseModel):
 @app.get("/", response_class=HTMLResponse)
 async def root():
     return FileResponse(str(STATIC_PATH / "app.html"))
+
+# ── Auth API ───────────────────────────────────────────────────────────────────
+
+@app.post("/api/auth/login")
+async def api_login(request: Request):
+    ip = _client_ip(request)
+    now = time.time()
+
+    # Purge old entries
+    _fail_times[ip] = [t for t in _fail_times[ip] if now - t < RATE_WINDOW]
+
+    if len(_fail_times[ip]) >= RATE_MAX_FAIL:
+        retry_after = int(RATE_WINDOW - (now - _fail_times[ip][0]))
+        write_log(None, "WARN", "login_blocked",
+                  f"ip={ip} failures={len(_fail_times[ip])} retry_after={retry_after}s")
+        raise HTTPException(429, f"Too many failed attempts. Try again in {retry_after}s")
+
+    body = await request.json()
+    tok  = str(body.get("token", ""))
+
+    if not secrets.compare_digest(tok, ADMIN_TOKEN):
+        _fail_times[ip].append(now)
+        remaining = max(0, RATE_MAX_FAIL - len(_fail_times[ip]))
+        write_log(None, "WARN", "login_failed", f"ip={ip} attempts_left={remaining}")
+        raise HTTPException(401, f"Invalid token. Attempts left: {remaining}")
+
+    # Success — clear failures, record last login
+    _fail_times.pop(ip, None)
+    _last_admin_login["ip"] = ip
+    _last_admin_login["ts"] = now
+    write_log(None, "INFO", "login_success", f"ip={ip}")
+    return {"ok": True}
+
+
+@app.get("/api/auth/status")
+async def api_auth_status(request: Request):
+    require_admin(request)
+    ip = _client_ip(request)
+    now = time.time()
+
+    # Recent failed IPs (within last 24h from logs)
+    with get_db() as c:
+        fail_rows = c.execute(
+            """SELECT detail, ts FROM logs
+               WHERE event='login_failed' AND ts > ?
+               ORDER BY ts DESC LIMIT 50""",
+            (now - 86400,),
+        ).fetchall()
+
+    fail_ips: dict = {}
+    for r in fail_rows:
+        # detail = "ip=1.2.3.4 attempts_left=N"
+        for part in r["detail"].split():
+            if part.startswith("ip="):
+                fip = part[3:]
+                if fip not in fail_ips:
+                    fail_ips[fip] = {"ip": fip, "last_ts": r["ts"], "count": 0}
+                fail_ips[fip]["count"] += 1
+
+    blocked_ips = []
+    for fip, ftimes in _fail_times.items():
+        clean = [t for t in ftimes if now - t < RATE_WINDOW]
+        if len(clean) >= RATE_MAX_FAIL:
+            blocked_ips.append({"ip": fip, "until": int(clean[0] + RATE_WINDOW)})
+
+    return {
+        "client_ip":    ip,
+        "last_login":   _last_admin_login.copy() if _last_admin_login else None,
+        "failed_ips":   list(fail_ips.values()),
+        "blocked_ips":  blocked_ips,
+    }
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # NODE API  (called by honeypot agents)
