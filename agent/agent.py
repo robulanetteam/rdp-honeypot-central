@@ -187,8 +187,14 @@ def main():
 
     current_hash = compute_hash(blocklist, analytics)
     if current_hash == load_last_hash():
-        log("INFO", "Data unchanged since last submission — skipping")
-        sys.exit(0)
+        log("INFO", "Data unchanged since last submission — sending heartbeat only")
+        try:
+            post_json(f"{base_url}/api/heartbeat", cfg["token"], {}, insecure)
+            log("INFO", "Heartbeat OK")
+        except RuntimeError as e:
+            log("ERROR", str(e))
+            sys.exit(1)
+        return
 
     try:
         result = post_json(
@@ -208,9 +214,9 @@ def main():
     status = result.get("status")
     sub_id = result.get("submission_id")
 
-    if status == "accepted":
+    if status in ("accepted", "auto_approved", "auto_deployed"):
         save_hash(current_hash)
-        log("INFO", f"Accepted  submission_id={sub_id}")
+        log("INFO", f"Accepted  submission_id={sub_id} status={status}")
     elif status == "duplicate":
         save_hash(current_hash)
         log("INFO", f"Duplicate submission_id={sub_id} (already pending/approved)")
