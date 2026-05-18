@@ -115,13 +115,11 @@
             <div id="detail-deployed-ips" class="hidden mt-2"></div>
           </div>
           <div>
-            <p class="text-xs text-gray-500 mb-1 flex justify-between">
-              <span>Analytics (last 50 events)</span>
+            <p class="text-xs text-gray-500 mb-1 flex justify-between items-center">
+              <span>Analytics</span>
               <span id="detail-an-count" class="text-blue-400"></span>
             </p>
-            <textarea id="detail-an"
-              class="w-full h-72 bg-gray-900 text-blue-400 text-xs p-3 rounded border border-gray-700 font-mono resize-none focus:outline-none"
-              readonly spellcheck="false"></textarea>
+            <div id="detail-an-table" class="w-full h-72 overflow-y-auto bg-gray-900 rounded border border-gray-700 text-xs"></div>
           </div>
         </div>
         <div id="detail-stats"></div>
@@ -466,10 +464,18 @@ async function loadNodes() {
             class="rounded accent-cyan-500">
         </div>
         <div id="aa-opts-${esc(n.id)}" class="${n.auto_approve ? '' : 'hidden'} space-y-2 pl-2 border-l border-gray-700">
-          <div class="flex items-center justify-between">
-            <label class="text-gray-400">Min score (0–100)</label>
-            <input type="number" id="aa-thr-${esc(n.id)}" value="${n.auto_score_threshold ?? 70}" min="0" max="100"
-              class="w-20 bg-gray-700 border border-gray-600 rounded px-2 py-0.5 text-right text-white text-xs">
+          <div class="space-y-1">
+            <div class="flex items-center justify-between">
+              <label class="text-gray-400">Min score (0–100)</label>
+              <input type="number" id="aa-thr-${esc(n.id)}" value="${n.auto_score_threshold ?? 70}" min="0" max="100"
+                class="w-20 bg-gray-700 border border-gray-600 rounded px-2 py-0.5 text-right text-white text-xs">
+            </div>
+            <div class="text-gray-600 leading-relaxed" style="font-size:0.65rem">
+              <span class="text-red-400">брутфорс</span> 20+ IP: ~85–100 &nbsp;·&nbsp;
+              <span class="text-yellow-400">сканер</span> 5–19 IP: ~55–80 &nbsp;·&nbsp;
+              <span class="text-gray-500">дубли &gt;80%</span>: ~30–50
+              <div class="text-gray-700 mt-0.5">+30 есть аналитика &nbsp;·&nbsp; +30/+20/+10 ≥20/5/1 IP &nbsp;·&nbsp; +25/+10/−20 новых ≥50%/20%/&lt;5% &nbsp;·&nbsp; +15/+8 плотность ≥5/2</div>
+            </div>
           </div>
           <div class="flex items-center justify-between">
             <label class="text-gray-400">Auto-deploy after approve</label>
@@ -632,9 +638,7 @@ async function showDetail(id) {
   let analytics = [];
   try { analytics = s.analytics ? JSON.parse(s.analytics) : []; } catch(_) {}
   document.getElementById('detail-an-count').textContent = `${analytics.length} events`;
-  document.getElementById('detail-an').value = analytics.length
-    ? analytics.slice(-50).map(e => JSON.stringify(e)).join('\n')
-    : '(empty)';
+  renderAnalyticsTable(analytics);
 
   // Actions
   const actions = document.getElementById('detail-actions');
@@ -759,6 +763,52 @@ function renderAnalyticsStats(events) {
         </div>` : ''}
       </div>` : ''}
     </div>`;
+}
+
+function renderAnalyticsTable(events) {
+  const el = document.getElementById('detail-an-table');
+  if (!el) return;
+  if (!events.length) {
+    el.innerHTML = '<p class="text-gray-600 p-3">Нет данных аналитики</p>';
+    return;
+  }
+  const clsColor = {
+    scanner:     'text-yellow-400',
+    bruteforcer: 'text-red-400',
+    accidental:  'text-gray-400',
+    unknown:     'text-gray-600',
+  };
+  const rows = [...events].reverse().slice(0, 300);
+  el.innerHTML = `
+    <table class="w-full">
+      <thead class="sticky top-0 bg-gray-800 text-gray-500 border-b border-gray-700">
+        <tr>
+          <th class="px-3 py-1.5 text-left font-normal">IP</th>
+          <th class="px-3 py-1.5 text-left font-normal">Тип</th>
+          <th class="px-3 py-1.5 text-left font-normal">Страна</th>
+          <th class="px-3 py-1.5 text-right font-normal">Сессий</th>
+          <th class="px-3 py-1.5 text-center font-normal" title="Пароль захвачен">🔑</th>
+          <th class="px-3 py-1.5 text-left font-normal">Время</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-700/40">
+        ${rows.map(e => {
+          const ts = e.timestamp || e.ts;
+          const epoch = ts ? (typeof ts === 'number' ? ts : new Date(ts).getTime() / 1000) : null;
+          const cls   = e.classification || 'unknown';
+          return `<tr class="hover:bg-gray-800/60">
+            <td class="px-3 py-1 font-mono text-gray-200 whitespace-nowrap">${esc(e.source_ip || '—')}</td>
+            <td class="px-3 py-1 whitespace-nowrap ${clsColor[cls] || 'text-gray-500'}">${esc(cls)}</td>
+            <td class="px-3 py-1 text-gray-400 whitespace-nowrap">${esc(e.country || '—')}</td>
+            <td class="px-3 py-1 text-right text-gray-300">${e.sessions_total ?? '—'}</td>
+            <td class="px-3 py-1 text-center">${e.has_credentials
+              ? '<span class="text-red-400 font-bold" title="Есть пароль">●</span>'
+              : '<span class="text-gray-700">○</span>'}</td>
+            <td class="px-3 py-1 text-gray-500 whitespace-nowrap">${epoch ? fmtTs(epoch) : '—'}</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>`;
 }
 
 function renderOverlapBanner(ov) {
