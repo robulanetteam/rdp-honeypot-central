@@ -87,8 +87,21 @@ def read_analytics(data_dir: Path, days: int = 7) -> list:
                     obj = json.loads(line)
                     # Accept event if timestamp >= cutoff, or if no parseable ts
                     ts = obj.get("timestamp") or obj.get("ts") or obj.get("time")
-                    if ts is None or (isinstance(ts, (int, float)) and ts >= cutoff):
+                    if ts is None:
                         events.append(obj)
+                    elif isinstance(ts, (int, float)):
+                        if ts >= cutoff:
+                            events.append(obj)
+                    else:
+                        # ISO string: parse epoch from first 19 chars "YYYY-MM-DDTHH:MM:SS"
+                        try:
+                            import datetime
+                            ts_epoch = datetime.datetime.fromisoformat(str(ts)[:19]).replace(
+                                tzinfo=datetime.timezone.utc).timestamp()
+                            if ts_epoch >= cutoff:
+                                events.append(obj)
+                        except Exception:
+                            events.append(obj)  # can't parse → include anyway
                 except json.JSONDecodeError:
                     pass
     except OSError as e:
