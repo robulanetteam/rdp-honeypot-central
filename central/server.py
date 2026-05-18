@@ -22,7 +22,10 @@ import sqlite3
 import time
 import asyncio
 import subprocess
-from collections import defaultdict
+import threading
+import urllib.request
+import urllib.parse
+from collections import Counter, defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
@@ -117,6 +120,11 @@ def init_db():
 
         CREATE INDEX IF NOT EXISTS ix_logs_ts      ON logs(ts DESC);
         CREATE INDEX IF NOT EXISTS ix_logs_node    ON logs(node_id);
+
+        CREATE TABLE IF NOT EXISTS settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL DEFAULT ''
+        );
         """)
 
 
@@ -183,6 +191,53 @@ def write_log(node_id: Optional[str], level: str, event: str, detail: str = ""):
         )
         if level == "ERROR" and node_id:
             c.execute("UPDATE nodes SET last_error=? WHERE id=?", (detail[:500], node_id))
+
+
+def _build_analytics_stats(events: list) -> dict:
+    """Compute bruteforcer/scanner counts and top countries from analytics events."""
+    types     = Counter(e.get("classification", "unknown") for e in events)
+    countries = Counter(
+        e.get("country", "") for e in events
+        if e.get("country") and e.get("country") not in ("—", "")
+    )
+    top_c = ", ".join(f"{c}:{n}" for c, n in countries.most_common(5))
+    return {
+        "bruteforcers": types.get("bruteforcer", 0),
+        "scanners":     types.get("scanner", 0),
+        "countries":    top_c or "—",
+    }
+
+
+def _telegram_send_sync(bot_token: str, chat_id: str, text: str) -> None:
+    try:
+        url  = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        data = urllib.parse.urlencode({
+            "chat_id":    chat_id,
+            "text":       text,
+            "parse_mode": "HTML",
+        }).encode()
+        req = urllib.request.Request(url, data=data, method="POST")
+        urllib.request.urlopen(req, timeout=6)
+    except Exception as exc:
+        write_log(None, "WARN", "telegram_error", str(exc)[:300])
+
+
+def notify_telegram(text: str) -> None:
+    """Fire-and-forget Telegram notification (reads token/chat from DB)."""
+    try:
+        with get_db() as c:
+            tok = c.execute("SELECT value FROM settings WHERE key='telegram_bot_token'").fetchone()
+            cid = c.execute("SELECT value FROM settings WHERE key='telegram_chat_id'").fetchone()
+        if not tok or not cid or not tok["value"] or not cid["value"]:
+            return
+        threading.Thread(
+            target=_telegram_send_sync,
+            args=(tok["value"], cid["value"], text),
+            daemon=True,
+        ).start()
+    except Exception:
+        pass
+
 
 def calculate_score(blocklist: str, analytics: list | None, deployed_ips: set) -> float:
     """Quality score 0–100 used for auto-approval decisions.
@@ -403,6 +458,17 @@ async def api_submit(
             )
         write_log(node["id"], "INFO", "auto_approved",
                   f"sub_id={sub_id} score={score} threshold={threshold}")
+
+        # Telegram notification for auto-approve
+        _st = _build_analytics_stats(payload.analytics or [])
+        notify_telegram(
+            f"✅ <b>Auto-approved</b>: {node['label']}\n"
+            f"📋 Sub #{sub_id} | Score: {score}\n"
+            f"🔒 IP: {bl_count}\n"
+            f"🤖 Bruteforcers: {_st['bruteforcers']} | Scanners: {_st['scanners']}\n"
+            f"🌍 {_st['countries']}"
+        )
+
         if auto_deploy:
             try:
                 dr = _do_deploy_internal(triggered_by=node["id"])
@@ -784,7 +850,7 @@ def _do_deploy_internal(triggered_by: Optional[str] = None) -> dict:
     """Shared deploy logic. Called from api_deploy() and auto-deploy in api_submit()."""
     with get_db() as c:
         rows = c.execute("""
-            SELECT s.id, s.blocklist, n.label
+            SELECT s.id, s.blocklist, s.analytics, n.label
             FROM submissions s
             JOIN nodes n ON s.node_id = n.id
             WHERE s.status = 'approved'
@@ -863,6 +929,23 @@ def _do_deploy_internal(triggered_by: Optional[str] = None) -> dict:
 
     write_log(triggered_by, "INFO", "deploy",
               f"deployed_ips={len(ips)} sub_ids={sub_ids} triggered_by={triggered_by or 'admin'}")
+
+    # Telegram notification for deploy
+    _all_an: list = []
+    for _row in rows:
+        if _row["analytics"]:
+            try:
+                _all_an.extend(json.loads(_row["analytics"]) or [])
+            except Exception:
+                pass
+    _st = _build_analytics_stats(_all_an)
+    notify_telegram(
+        f"\U0001f680 <b>Deployed</b>" + (f" (auto: {triggered_by})" if triggered_by else " (manual)") + "\n"
+        f"\U0001f512 IP в блоклисте: {len(ips)}\n"
+        f"\U0001f916 Bruteforcers: {_st['bruteforcers']} | Scanners: {_st['scanners']}\n"
+        f"\U0001f30d {_st['countries']}"
+    )
+
     return {
         "deployed_ips":     len(ips),
         "files": {
@@ -882,3 +965,79 @@ async def api_deployments(request: Request):
             "SELECT * FROM deployments ORDER BY created_at DESC LIMIT 50"
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── Telegram settings ──────────────────────────────────────────────────────────
+
+@app.get("/api/settings/telegram")
+async def api_get_telegram_settings(request: Request):
+    require_admin(request)
+    with get_db() as c:
+        tok = c.execute("SELECT value FROM settings WHERE key='telegram_bot_token'").fetchone()
+        cid = c.execute("SELECT value FROM settings WHERE key='telegram_chat_id'").fetchone()
+    return {
+        "bot_token": tok["value"] if tok else "",
+        "chat_id":   cid["value"] if cid else "",
+    }
+
+
+@app.post("/api/settings/telegram")
+async def api_set_telegram_settings(request: Request):
+    require_admin(request)
+    body      = await request.json()
+    bot_token = str(body.get("bot_token", "")).strip()
+    chat_id   = str(body.get("chat_id",   "")).strip()
+    with get_db() as c:
+        c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('telegram_bot_token', ?)", (bot_token,))
+        c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('telegram_chat_id', ?)",   (chat_id,))
+    return {"ok": True}
+
+
+@app.post("/api/settings/telegram/test")
+async def api_test_telegram(request: Request):
+    require_admin(request)
+    notify_telegram("\U0001f9ea <b>Тест Honeypot Central</b>\nУведомления работают \u2713")
+    return {"ok": True}
+
+
+# ── Connections ────────────────────────────────────────────────────────────────
+
+@app.get("/api/connections")
+async def api_connections(request: Request, limit: int = 2000):
+    """Return deduplicated analytics events from all submissions, sorted by timestamp DESC."""
+    require_admin(request)
+    limit = min(limit, 10000)
+    with get_db() as c:
+        rows = c.execute("""
+            SELECT s.node_id, n.label AS node_label, s.analytics
+            FROM submissions s
+            JOIN nodes n ON s.node_id = n.id
+            WHERE s.analytics IS NOT NULL
+            ORDER BY s.submitted_at DESC
+            LIMIT 200
+        """).fetchall()
+
+    seen: dict = {}   # ip -> event dict (first occurrence = most recent submission)
+    for row in rows:
+        try:
+            an = json.loads(row["analytics"])
+        except Exception:
+            continue
+        for e in an:
+            ip = (e.get("source_ip") or "").strip()
+            if not ip or ip in seen:
+                continue
+            ts = e.get("timestamp") or e.get("ts")
+            seen[ip] = {
+                "node_id":        row["node_id"],
+                "node_label":     row["node_label"],
+                "source_ip":      ip,
+                "classification": e.get("classification", "unknown"),
+                "country":        e.get("country") or "",
+                "sessions_total": e.get("sessions_total"),
+                "has_credentials": bool(e.get("has_credentials", False)),
+                "ts":              ts,
+            }
+
+    events = sorted(seen.values(), key=lambda x: (x["ts"] or 0), reverse=True)
+    return events[:limit]

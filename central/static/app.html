@@ -57,6 +57,7 @@
       <button onclick="setTab('submissions')" id="tab-submissions" class="tab-btn">Submissions</button>
       <button onclick="setTab('deploy')"      id="tab-deploy"      class="tab-btn">Deploy</button>
       <button onclick="setTab('whitelist')"   id="tab-whitelist"   class="tab-btn">Whitelist</button>
+      <button onclick="setTab('connections')" id="tab-connections" class="tab-btn">Connections</button>
       <button onclick="setTab('logs')"        id="tab-logs"        class="tab-btn">Logs</button>
       <button onclick="setTab('settings')"    id="tab-settings"    class="tab-btn">Settings</button>
     </nav>
@@ -218,6 +219,20 @@
       </div>
     </div><!-- /pane-logs -->
 
+    <!-- ── CONNECTIONS ──────────────────────────────────────────────────── -->
+    <div id="pane-connections" class="pane hidden">
+      <div class="flex items-center gap-3 mb-4">
+        <h2 class="text-orange-400 font-bold">Connections</h2>
+        <button onclick="loadConnections()" class="text-xs text-gray-500 hover:text-gray-300">↺ Refresh</button>
+        <span id="conn-count" class="ml-auto text-xs text-gray-600"></span>
+      </div>
+      <div class="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
+        <div id="conn-table" class="overflow-y-auto text-xs" style="max-height:75vh">
+          <p class="text-gray-600 p-3">Загрузка…</p>
+        </div>
+      </div>
+    </div><!-- /pane-connections -->
+
     <!-- ── SETTINGS ──────────────────────────────────────────────────────── -->
     <div id="pane-settings" class="pane hidden">
       <div class="max-w-lg space-y-4">
@@ -246,6 +261,30 @@
         <div class="bg-gray-800 rounded-xl border border-gray-700 p-5">
           <h2 class="font-bold text-orange-400 mb-3">Registered Nodes</h2>
           <div id="settings-nodes-list" class="divide-y divide-gray-700"></div>
+        </div>
+
+        <div class="bg-gray-800 rounded-xl border border-gray-700 p-5">
+          <h2 class="font-bold text-orange-400 mb-3">Telegram Notifications</h2>
+          <p class="text-xs text-gray-500 mb-3">Уведомления при авто-approve и deploy: кол-во IP, страны, bruteforcers, scanners.</p>
+          <div class="space-y-2">
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">Bot Token</label>
+              <input id="tg-token" type="password" placeholder="123456:ABCDEF…" autocomplete="off"
+                class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500">
+            </div>
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">Chat ID</label>
+              <input id="tg-chat" placeholder="-100123456789" autocomplete="off"
+                class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500">
+            </div>
+            <div class="flex gap-2 pt-1">
+              <button onclick="saveTelegramSettings()"
+                class="flex-1 bg-orange-600 hover:bg-orange-500 text-white rounded px-3 py-1.5 text-sm font-bold transition-colors">Save</button>
+              <button onclick="testTelegram()"
+                class="bg-gray-700 hover:bg-gray-600 text-gray-300 rounded px-3 py-1.5 text-sm transition-colors">Test</button>
+            </div>
+            <p id="tg-msg" class="text-xs hidden"></p>
+          </div>
         </div>
 
       </div>
@@ -372,6 +411,7 @@ function setTab(name) {
     submissions: () => loadSubs(currentSubFilter),
     deploy:      () => loadDeploy(),
     whitelist:   () => loadWhitelist(),
+    connections: () => loadConnections(),
     logs:        () => loadLogs(),
     settings:    () => loadSettingsNodes(),
   };
@@ -1150,6 +1190,7 @@ async function delWhitelist(ip) {
 // ── Settings ──────────────────────────────────────────────────────────────────
 
 async function loadSettingsNodes() {
+  loadTelegramSettings();
   const nodes = await api('GET', '/api/nodes').catch(() => []);
   const el = document.getElementById('settings-nodes-list');
   el.innerHTML = nodes.length
@@ -1236,6 +1277,140 @@ function fmtAgo(secs) {
   if (secs <  3600) return Math.floor(secs / 60)   + 'm ago';
   if (secs < 86400) return Math.floor(secs / 3600) + 'h ago';
   return Math.floor(secs / 86400) + 'd ago';
+}
+
+// ── Connections ───────────────────────────────────────────────────────────────
+
+let _connEvents = [];
+let _connSort   = { col: 'ts', dir: -1 };
+
+async function loadConnections() {
+  const data = await api('GET', '/api/connections').catch(e => { alert(e); return []; });
+  _connEvents = data;
+  _connSort   = { col: 'ts', dir: -1 };
+  document.getElementById('conn-count').textContent = data.length ? `${data.length} записей` : '';
+  _renderConnTable();
+}
+
+function _connSortBy(col) {
+  if (_connSort.col === col) {
+    _connSort.dir *= -1;
+  } else {
+    _connSort.col = col;
+    _connSort.dir = col === 'ts' ? -1 : 1;
+  }
+  _renderConnTable();
+}
+
+function _renderConnTable() {
+  const el = document.getElementById('conn-table');
+  if (!el) return;
+  if (!_connEvents.length) {
+    el.innerHTML = '<p class="text-gray-600 p-3">Нет данных о подключениях</p>';
+    return;
+  }
+  const clsColor = {
+    scanner:     'text-yellow-400',
+    bruteforcer: 'text-red-400',
+    accidental:  'text-gray-400',
+    unknown:     'text-gray-600',
+  };
+  const getTs = e => {
+    const t = e.ts;
+    if (!t) return 0;
+    return typeof t === 'number' ? t : new Date(t).getTime() / 1000;
+  };
+  const comparators = {
+    node:    (a, b) => (a.node_label || '').localeCompare(b.node_label || ''),
+    ip:      (a, b) => (a.source_ip || '').localeCompare(b.source_ip || ''),
+    cls:     (a, b) => (a.classification || '').localeCompare(b.classification || ''),
+    country: (a, b) => (a.country || '').localeCompare(b.country || ''),
+    sess:    (a, b) => (a.sessions_total || 0) - (b.sessions_total || 0),
+    cred:    (a, b) => (a.has_credentials ? 1 : 0) - (b.has_credentials ? 1 : 0),
+    ts:      (a, b) => getTs(a) - getTs(b),
+  };
+  const sorted = [..._connEvents].sort((a, b) => _connSort.dir * (comparators[_connSort.col] || comparators.ts)(a, b));
+  const rows   = sorted.slice(0, 2000);
+  const arrow  = col => {
+    if (_connSort.col !== col) return '<span class="text-gray-700 ml-0.5 select-none">⇅</span>';
+    return _connSort.dir > 0
+      ? '<span class="text-orange-400 ml-0.5 select-none">↑</span>'
+      : '<span class="text-orange-400 ml-0.5 select-none">↓</span>';
+  };
+  const thCls = 'px-3 py-1.5 font-normal cursor-pointer hover:text-gray-300 select-none whitespace-nowrap';
+  el.innerHTML = `
+    <table class="w-full">
+      <thead class="sticky top-0 bg-gray-800 text-gray-500 border-b border-gray-700">
+        <tr>
+          <th class="${thCls} text-left"  onclick="_connSortBy('node')">Нода ${arrow('node')}</th>
+          <th class="${thCls} text-left"  onclick="_connSortBy('ip')">IP ${arrow('ip')}</th>
+          <th class="${thCls} text-left"  onclick="_connSortBy('cls')">Тип ${arrow('cls')}</th>
+          <th class="${thCls} text-left"  onclick="_connSortBy('country')">Страна ${arrow('country')}</th>
+          <th class="${thCls} text-right" onclick="_connSortBy('sess')">Сессий ${arrow('sess')}</th>
+          <th class="${thCls} text-center" onclick="_connSortBy('cred')" title="Пароль захвачен">🔑 ${arrow('cred')}</th>
+          <th class="${thCls} text-left"  onclick="_connSortBy('ts')">Время ${arrow('ts')}</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-700/40">
+        ${rows.map(e => {
+          const epoch = getTs(e);
+          const cls   = e.classification || 'unknown';
+          return `<tr class="hover:bg-gray-800/60">
+            <td class="px-3 py-1 text-gray-400 whitespace-nowrap">${esc(e.node_label || '—')}</td>
+            <td class="px-3 py-1 font-mono text-gray-200 whitespace-nowrap">${esc(e.source_ip || '—')}</td>
+            <td class="px-3 py-1 whitespace-nowrap ${clsColor[cls] || 'text-gray-500'}">${esc(cls)}</td>
+            <td class="px-3 py-1 text-gray-400 whitespace-nowrap">${esc(e.country || '—')}</td>
+            <td class="px-3 py-1 text-right text-gray-300">${e.sessions_total ?? '—'}</td>
+            <td class="px-3 py-1 text-center">${e.has_credentials
+              ? '<span class="text-red-400 font-bold" title="Есть пароль">●</span>'
+              : '<span class="text-gray-700">○</span>'}</td>
+            <td class="px-3 py-1 text-gray-500 whitespace-nowrap">${epoch ? fmtTs(epoch) : '—'}</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>`;
+}
+
+// ── Telegram settings ─────────────────────────────────────────────────────────
+
+async function loadTelegramSettings() {
+  const s = await api('GET', '/api/settings/telegram').catch(() => null);
+  if (!s) return;
+  document.getElementById('tg-token').value = s.bot_token || '';
+  document.getElementById('tg-chat').value  = s.chat_id   || '';
+}
+
+async function saveTelegramSettings() {
+  const msg = document.getElementById('tg-msg');
+  try {
+    await api('POST', '/api/settings/telegram', {
+      bot_token: document.getElementById('tg-token').value.trim(),
+      chat_id:   document.getElementById('tg-chat').value.trim(),
+    });
+    msg.textContent = '✓ Сохранено';
+    msg.className = 'text-xs text-green-400';
+    msg.classList.remove('hidden');
+    setTimeout(() => msg.classList.add('hidden'), 2000);
+  } catch(e) {
+    msg.textContent = '✗ ' + e.message;
+    msg.className = 'text-xs text-red-400';
+    msg.classList.remove('hidden');
+  }
+}
+
+async function testTelegram() {
+  const msg = document.getElementById('tg-msg');
+  try {
+    await api('POST', '/api/settings/telegram/test');
+    msg.textContent = '✓ Тест отправлен';
+    msg.className = 'text-xs text-green-400';
+    msg.classList.remove('hidden');
+    setTimeout(() => msg.classList.add('hidden'), 3000);
+  } catch(e) {
+    msg.textContent = '✗ ' + e.message;
+    msg.className = 'text-xs text-red-400';
+    msg.classList.remove('hidden');
+  }
 }
 </script>
 </body>
