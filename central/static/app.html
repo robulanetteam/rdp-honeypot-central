@@ -90,6 +90,7 @@
           <h3 class="font-bold text-orange-400 text-base" id="detail-title"></h3>
           <button onclick="closeDetail()" class="text-gray-600 hover:text-gray-300 text-lg leading-none">✕</button>
         </div>
+        <div id="detail-overlap" class="hidden mb-3"></div>
         <div class="flex gap-2 mb-4" id="detail-actions"></div>
         <div id="detail-meta" class="text-xs text-gray-500 mb-4 grid grid-cols-3 gap-4"></div>
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -116,6 +117,7 @@
               readonly spellcheck="false"></textarea>
           </div>
         </div>
+        <div id="detail-stats"></div>
       </div>
     </div>
 
@@ -431,6 +433,14 @@ async function showDetail(id) {
     actions.innerHTML = '';
   }
 
+  // Analytics stats
+  renderAnalyticsStats(analytics);
+  // Overlap check (async, pending only)
+  const ovEl = document.getElementById('detail-overlap');
+  ovEl.innerHTML = '';
+  ovEl.classList.add('hidden');
+  if (s.status === 'pending') renderOverlap(s.id);
+
   document.getElementById('sub-detail').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
@@ -449,6 +459,107 @@ async function saveBlocklist() {
     btn.textContent = 'Save';
     btn.classList.replace('bg-green-700', 'bg-orange-600');
   }, 1500);
+}
+
+function renderAnalyticsStats(events) {
+  const el = document.getElementById('detail-stats');
+  if (!events.length) { el.innerHTML = ''; return; }
+
+  const now = Date.now() / 1000;
+  const cutoff24 = now - 86400;
+  const cls = {}, countries = {}, subnets = {};
+  let creds = 0, totalSessions = 0, evts24 = 0;
+
+  for (const e of events) {
+    const c = e.classification || 'unknown';
+    cls[c] = (cls[c] || 0) + 1;
+    if (e.has_credentials) creds++;
+    totalSessions += (e.sessions_total || 0);
+    const ts = e.timestamp || e.ts;
+    if (ts) {
+      const epoch = typeof ts === 'number' ? ts : (new Date(ts).getTime() / 1000);
+      if (epoch >= cutoff24) evts24++;
+    }
+    if (e.country) countries[e.country] = (countries[e.country] || 0) + 1;
+    if (e.source_ip) {
+      const parts = e.source_ip.split('.');
+      if (parts.length === 4) {
+        const s24 = parts.slice(0, 3).join('.') + '.0/24';
+        subnets[s24] = (subnets[s24] || 0) + 1;
+      }
+    }
+  }
+
+  const top5sub = Object.entries(subnets).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const top5cnt = Object.entries(countries).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const clsColors = { scanner: 'text-yellow-400', bruteforcer: 'text-red-400', accidental: 'text-gray-400', unknown: 'text-gray-600' };
+  const clsHtml = Object.entries(cls).sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `<span class="${clsColors[k] || 'text-gray-400'} font-bold">${v}</span> <span class="text-gray-600">${k}</span>`)
+    .join(' &nbsp;&middot;&nbsp; ');
+
+  el.innerHTML = `
+    <div class="border-t border-gray-700 pt-4 mt-1">
+      <p class="text-xs text-gray-500 font-bold mb-3">Analytics Summary</p>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+        <div class="bg-gray-900 rounded p-3">
+          <p class="text-xs text-gray-600 mb-1">IPs seen</p>
+          <p class="text-2xl font-bold text-white">${events.length}</p>
+        </div>
+        <div class="bg-gray-900 rounded p-3">
+          <p class="text-xs text-gray-600 mb-1">Credentials captured</p>
+          <p class="text-2xl font-bold text-red-400">${creds}</p>
+        </div>
+        <div class="bg-gray-900 rounded p-3">
+          <p class="text-xs text-gray-600 mb-1">Total connections</p>
+          <p class="text-2xl font-bold text-white">${totalSessions}</p>
+        </div>
+        <div class="bg-gray-900 rounded p-3">
+          <p class="text-xs text-gray-600 mb-1">Events last 24h</p>
+          <p class="text-2xl font-bold text-blue-400">${evts24}</p>
+        </div>
+      </div>
+      <p class="text-xs mb-3">${clsHtml}</p>
+      ${(top5sub.length || top5cnt.length) ? `
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        ${top5sub.length ? `
+        <div>
+          <p class="text-xs text-gray-600 mb-1 font-bold">Top-5 /24 subnets</p>
+          ${top5sub.map(([s, c]) => `<div class="flex justify-between text-xs py-0.5"><span class="text-gray-300 font-mono">${esc(s)}</span><span class="text-gray-500">${c} IPs</span></div>`).join('')}
+        </div>` : ''}
+        ${top5cnt.length ? `
+        <div>
+          <p class="text-xs text-gray-600 mb-1 font-bold">Top countries</p>
+          ${top5cnt.map(([c, n]) => `<div class="flex justify-between text-xs py-0.5"><span class="text-gray-300">${esc(c)}</span><span class="text-gray-500">${n} IPs</span></div>`).join('')}
+        </div>` : ''}
+      </div>` : ''}
+    </div>`;
+}
+
+async function renderOverlap(subId) {
+  const el = document.getElementById('detail-overlap');
+  const ov = await api('GET', `/api/submissions/${subId}/overlap`).catch(() => null);
+  if (!ov) return;
+
+  const warnings = [];
+  if (ov.deployed_overlap > 0) {
+    const pct = Math.round(ov.deployed_overlap / ov.total_ips * 100);
+    warnings.push(`<span class="font-bold text-yellow-300">${ov.deployed_overlap}</span> из ${ov.total_ips} IP уже в deployed блоклисте (${pct}%)`);
+  }
+  for (const o of ov.other_submissions) {
+    warnings.push(`<span class="font-bold text-orange-300">${o.overlap}</span> IP пересекаются с Submission #${o.id} (${esc(o.node_label)})`);
+  }
+
+  if (!warnings.length) {
+    el.innerHTML = `<div class="text-xs text-green-500">✓ Все ${ov.total_ips} IP новые — нет пересечений с deployed блоклистом</div>`;
+  } else {
+    el.innerHTML = `
+      <div class="bg-yellow-900/30 border border-yellow-700/50 rounded-lg p-3 text-xs">
+        <p class="font-bold text-yellow-400 mb-1">&#9888; Обнаружены совпадения</p>
+        ${warnings.map(w => `<p class="text-gray-300">${w}</p>`).join('')}
+        <p class="text-gray-500 mt-1">Новых IP (не в deployed): <span class="text-green-400 font-bold">${ov.new_ips}</span></p>
+      </div>`;
+  }
+  el.classList.remove('hidden');
 }
 
 async function quickApprove(id) {

@@ -339,6 +339,54 @@ async def api_update_submission(sub_id: int, request: Request):
         c.execute("UPDATE submissions SET blocklist=? WHERE id=?", (blocklist, sub_id))
     return {"updated": sub_id}
 
+
+@app.get("/api/submissions/{sub_id}/overlap")
+async def api_overlap(sub_id: int, request: Request):
+    """Return IP overlap stats with deployed blocklist and other pending/approved submissions."""
+    require_admin(request)
+
+    def parse_ips(text: str) -> set:
+        if not text:
+            return set()
+        return {l.strip() for l in text.splitlines() if l.strip() and not l.startswith('#')}
+
+    with get_db() as c:
+        row = c.execute(
+            "SELECT blocklist, node_id FROM submissions WHERE id=?", (sub_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Submission not found")
+
+        sub_ips = parse_ips(row["blocklist"])
+
+        deployed_ips: set = set()
+        deployed_file = DEPLOY_PATH / "blocklist.txt"
+        if deployed_file.exists():
+            deployed_ips = parse_ips(
+                deployed_file.read_text(encoding="utf-8", errors="replace")
+            )
+
+        others = c.execute("""
+            SELECT s.id, s.blocklist, n.label AS node_label
+            FROM submissions s JOIN nodes n ON s.node_id = n.id
+            WHERE s.id != ? AND s.status IN ('pending','approved') AND s.blocklist IS NOT NULL
+        """, (sub_id,)).fetchall()
+
+    overlapping = []
+    for o in others:
+        o_ips = parse_ips(o["blocklist"])
+        ov = len(sub_ips & o_ips)
+        if ov:
+            overlapping.append({"id": o["id"], "node_label": o["node_label"], "overlap": ov})
+
+    return {
+        "total_ips":        len(sub_ips),
+        "deployed_total":   len(deployed_ips),
+        "deployed_overlap": len(sub_ips & deployed_ips),
+        "new_ips":          len(sub_ips - deployed_ips),
+        "other_submissions": overlapping,
+    }
+
 # ── Deploy ─────────────────────────────────────────────────────────────────────
 
 @app.get("/api/deploy/preview")
