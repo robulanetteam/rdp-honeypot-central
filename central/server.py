@@ -6,11 +6,12 @@ Collects data from distributed honeypot nodes, provides review workflow
 and merged deployment to mirror.
 
 Env vars:
-  DB_PATH      – path to SQLite database (default: /data/central.db)
-  DEPLOY_PATH  – directory where merged blocklist.txt is written (default: /data/public)
-  STATIC_PATH  – path to static/ directory with app.html (default: /app/static)
-  ADMIN_TOKEN  – admin secret for web UI (default: change-me)
-  ONLINE_SECS  – seconds before node is considered offline (default: 900)
+  DB_PATH             – path to SQLite database (default: /data/central.db)
+  DEPLOY_PATH         – directory where merged files are written (default: /data/public)
+  STATIC_PATH         – path to static/ directory with app.html (default: /app/static)
+  ADMIN_TOKEN         – admin secret for web UI (default: change-me)
+  ONLINE_SECS         – seconds before node is considered offline (default: 900)
+  MIKROTIK_LIST_NAME  – RouterOS address-list name (default: honeypot-block)
 """
 
 import json
@@ -30,11 +31,12 @@ from pydantic import BaseModel
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-DB_PATH     = Path(os.environ.get("DB_PATH",     "/data/central.db"))
-DEPLOY_PATH = Path(os.environ.get("DEPLOY_PATH", "/data/public"))
-STATIC_PATH = Path(os.environ.get("STATIC_PATH", "/app/static"))
-ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN",       "change-me")
-ONLINE_SECS = int(os.environ.get("ONLINE_SECS",  "900"))
+DB_PATH            = Path(os.environ.get("DB_PATH",            "/data/central.db"))
+DEPLOY_PATH        = Path(os.environ.get("DEPLOY_PATH",        "/data/public"))
+STATIC_PATH        = Path(os.environ.get("STATIC_PATH",        "/app/static"))
+ADMIN_TOKEN        = os.environ.get("ADMIN_TOKEN",             "change-me")
+ONLINE_SECS        = int(os.environ.get("ONLINE_SECS",         "900"))
+MIKROTIK_LIST_NAME = os.environ.get("MIKROTIK_LIST_NAME",      "honeypot-block")
 
 # ── Database ───────────────────────────────────────────────────────────────────
 
@@ -93,11 +95,13 @@ def init_db():
 
 
 init_db()
+DEPLOY_PATH.mkdir(parents=True, exist_ok=True)
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="Honeypot Central", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=str(STATIC_PATH)), name="static")
+app.mount("/pub",    StaticFiles(directory=str(DEPLOY_PATH)), name="public")
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -373,8 +377,40 @@ async def api_deploy(request: Request):
                     ips.setdefault(ip, row["label"])
 
     DEPLOY_PATH.mkdir(parents=True, exist_ok=True)
-    out = DEPLOY_PATH / "blocklist.txt"
-    out.write_text("\n".join(sorted(ips.keys())) + "\n")
+    sorted_ips = sorted(ips.keys())
+    sources    = sorted({v for v in ips.values()})
+    generated  = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+
+    # ── plain text (one IP per line) ──────────────────────────────────────────
+    (DEPLOY_PATH / "blocklist.txt").write_text(
+        "\n".join(sorted_ips) + "\n"
+    )
+
+    # ── pfBlockerNG (plain IPs with header comment) ───────────────────────────
+    pf_lines = [
+        f"# Honeypot Central – pfBlockerNG blocklist",
+        f"# Generated : {generated}",
+        f"# Sources   : {', '.join(sources)}",
+        f"# IPs       : {len(sorted_ips)}",
+        "",
+    ] + sorted_ips + [""]
+    (DEPLOY_PATH / "blocklist_pfblocker.txt").write_text("\n".join(pf_lines))
+
+    # ── MikroTik RouterOS script ──────────────────────────────────────────────
+    mt_lines = [
+        f"# Honeypot Central – MikroTik address-list",
+        f"# Generated : {generated}",
+        f"# Sources   : {', '.join(sources)}",
+        f"# IPs       : {len(sorted_ips)}",
+        f"# List name : {MIKROTIK_LIST_NAME}",
+        "",
+        f"/ip firewall address-list",
+        f"remove [find list={MIKROTIK_LIST_NAME}]",
+    ] + [
+        f'add address={ip} list={MIKROTIK_LIST_NAME} comment="honeypot-central"'
+        for ip in sorted_ips
+    ] + [""]
+    (DEPLOY_PATH / "blocklist_mikrotik.rsc").write_text("\n".join(mt_lines))
 
     sub_ids = [r["id"] for r in rows]
     placeholders = ",".join("?" * len(sub_ids))
@@ -385,13 +421,17 @@ async def api_deploy(request: Request):
         )
         c.execute(
             "INSERT INTO deployments (sub_ids, ip_count, path) VALUES (?,?,?)",
-            (json.dumps(sub_ids), len(ips), str(out)),
+            (json.dumps(sub_ids), len(ips), str(DEPLOY_PATH / "blocklist.txt")),
         )
 
     return {
-        "deployed_ips":      len(ips),
-        "path":              str(out),
-        "from_submissions":  sub_ids,
+        "deployed_ips":     len(ips),
+        "files": {
+            "plain":      "/pub/blocklist.txt",
+            "pfblocker":  "/pub/blocklist_pfblocker.txt",
+            "mikrotik":   "/pub/blocklist_mikrotik.rsc",
+        },
+        "from_submissions": sub_ids,
     }
 
 

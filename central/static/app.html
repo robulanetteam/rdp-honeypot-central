@@ -128,17 +128,28 @@
           </button>
           <p id="deploy-msg" class="text-xs mt-3 text-green-400 hidden"></p>
           <p id="deploy-err" class="text-xs mt-3 text-red-400 hidden"></p>
-        </div>
 
-        <div class="bg-gray-800 rounded-xl border border-gray-700 p-5">
-          <h2 class="font-bold text-orange-400 mb-4">Deployment History</h2>
-          <div id="deploy-history" class="text-gray-400 text-xs divide-y divide-gray-700"></div>
-        </div>
-      </div>
-    </div>
-
-    <!-- ── SETTINGS ───────────────────────────────────────────────────────── -->
-    <div id="pane-settings" class="pane hidden">
+          <!-- Format download links -->
+          <div id="deploy-files" class="hidden mt-4 border-t border-gray-700 pt-4">
+            <p class="text-xs text-gray-500 mb-2">Публичные ссылки для скачивания:</p>
+            <div class="space-y-2">
+              <a id="link-plain"     href="/pub/blocklist.txt"              target="_blank"
+                class="flex items-center justify-between px-3 py-2 bg-gray-900 rounded hover:bg-gray-700 transition-colors">
+                <span class="text-green-400 font-bold text-xs">Plain text</span>
+                <span class="text-gray-500 text-xs">blocklist.txt</span>
+              </a>
+              <a id="link-pfblocker" href="/pub/blocklist_pfblocker.txt"   target="_blank"
+                class="flex items-center justify-between px-3 py-2 bg-gray-900 rounded hover:bg-gray-700 transition-colors">
+                <span class="text-blue-400 font-bold text-xs">pfBlockerNG</span>
+                <span class="text-gray-500 text-xs">blocklist_pfblocker.txt</span>
+              </a>
+              <a id="link-mikrotik"  href="/pub/blocklist_mikrotik.rsc"    target="_blank"
+                class="flex items-center justify-between px-3 py-2 bg-gray-900 rounded hover:bg-gray-700 transition-colors">
+                <span class="text-yellow-400 font-bold text-xs">MikroTik RouterOS</span>
+                <span class="text-gray-500 text-xs">blocklist_mikrotik.rsc</span>
+              </a>
+            </div>
+          </div>
       <div class="max-w-lg space-y-4">
 
         <div class="bg-gray-800 rounded-xl border border-gray-700 p-5">
@@ -429,6 +440,11 @@ async function loadDeploy() {
     btn.disabled = true;
   }
 
+  // Show download links if a previous deploy exists
+  if (history.length > 0) {
+    document.getElementById('deploy-files').classList.remove('hidden');
+  }
+
   const histEl = document.getElementById('deploy-history');
   histEl.innerHTML = history.length
     ? history.map(d => `
@@ -452,8 +468,9 @@ async function doDeploy() {
   btn.textContent = 'Deploying…';
   try {
     const r = await api('POST', '/api/deploy');
-    msg.textContent = `✓ Deployed ${r.deployed_ips} IPs from ${r.from_submissions.length} submission(s) → ${r.path}`;
+    msg.textContent = `✓ Задеплоено ${r.deployed_ips} IPs из ${r.from_submissions.length} submission(s)`;
     msg.classList.remove('hidden');
+    document.getElementById('deploy-files').classList.remove('hidden');
     await loadDeploy();
   } catch(e) {
     err.textContent = '✗ ' + e.message;
