@@ -138,6 +138,11 @@
             class="w-full bg-green-700 hover:bg-green-600 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded px-4 py-2.5 font-bold text-sm transition-colors">
             Deploy to Mirror
           </button>
+          <button onclick="doPrune()" id="prune-btn"
+            class="w-full mt-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded px-4 py-2 text-sm transition-colors"
+            title="Удалить из deployed блоклиста IP с истёкшим block_until">
+            Prune expired IPs
+          </button>
           <p id="deploy-msg" class="text-xs mt-3 text-green-400 hidden"></p>
           <p id="deploy-err" class="text-xs mt-3 text-red-400 hidden"></p>
 
@@ -894,53 +899,6 @@ function _renderAnTable() {
       </thead>
       <tbody class="divide-y divide-gray-700/40">
         ${rows.map(e => {
-          const epoch = getEpoch(e)
-    bruteforcer: 'text-red-400',
-    accidental:  'text-gray-400',
-    unknown:     'text-gray-600',
-  };
-
-  const getEpoch = e => {
-    const ts = e.timestamp || e.ts;
-    if (!ts) return 0;
-    return typeof ts === 'number' ? ts : new Date(ts).getTime() / 1000;
-  };
-
-  const comparators = {
-    ip:      (a, b) => (a.source_ip || '').localeCompare(b.source_ip || ''),
-    cls:     (a, b) => (a.classification || '').localeCompare(b.classification || ''),
-    country: (a, b) => (a.country || '').localeCompare(b.country || ''),
-    sess:    (a, b) => (a.sessions_total || 0) - (b.sessions_total || 0),
-    cred:    (a, b) => (a.has_credentials ? 1 : 0) - (b.has_credentials ? 1 : 0),
-    ts:      (a, b) => getEpoch(a) - getEpoch(b),
-  };
-
-  const sorted = [..._anEvents].sort((a, b) => _anSort.dir * (comparators[_anSort.col] || comparators.ts)(a, b));
-  const rows   = sorted.slice(0, 300);
-
-  const arrow = col => {
-    if (_anSort.col !== col) return '<span class="text-gray-700 ml-0.5 select-none">⇅</span>';
-    return _anSort.dir > 0
-      ? '<span class="text-orange-400 ml-0.5 select-none">↑</span>'
-      : '<span class="text-orange-400 ml-0.5 select-none">↓</span>';
-  };
-
-  const thCls = 'px-3 py-1.5 font-normal cursor-pointer hover:text-gray-300 select-none whitespace-nowrap';
-
-  el.innerHTML = `
-    <table class="w-full">
-      <thead class="sticky top-0 bg-gray-800 text-gray-500 border-b border-gray-700">
-        <tr>
-          <th class="${thCls} text-left"  onclick="_anSortBy('ip')">IP ${arrow('ip')}</th>
-          <th class="${thCls} text-left"  onclick="_anSortBy('cls')">Тип ${arrow('cls')}</th>
-          <th class="${thCls} text-left"  onclick="_anSortBy('country')">Страна ${arrow('country')}</th>
-          <th class="${thCls} text-right" onclick="_anSortBy('sess')">Сессий ${arrow('sess')}</th>
-          <th class="${thCls} text-center" onclick="_anSortBy('cred')" title="Пароль захвачен">🔑 ${arrow('cred')}</th>
-          <th class="${thCls} text-left"  onclick="_anSortBy('ts')">Время ${arrow('ts')}</th>
-        </tr>
-      </thead>
-      <tbody class="divide-y divide-gray-700/40">
-        ${rows.map(e => {
           const epoch = getEpoch(e);
           const cls   = e.classification || 'unknown';
           return `<tr class="hover:bg-gray-800/60">
@@ -1055,6 +1013,27 @@ async function doDeploy() {
     btn.disabled = false;
   }
   btn.textContent = 'Deploy to Mirror';
+}
+
+async function doPrune() {
+  const btn = document.getElementById('prune-btn');
+  const msg = document.getElementById('deploy-msg');
+  const err = document.getElementById('deploy-err');
+  msg.classList.add('hidden');
+  err.classList.add('hidden');
+  btn.disabled = true;
+  btn.textContent = 'Pruning…';
+  try {
+    const r = await api('POST', '/api/deploy/prune');
+    msg.textContent = `✓ ${r.message}`;
+    msg.classList.remove('hidden');
+    await loadDeploy();
+  } catch(e) {
+    err.textContent = '✗ ' + e.message;
+    err.classList.remove('hidden');
+  }
+  btn.disabled = false;
+  btn.textContent = 'Prune expired IPs';
 }
 
 // ── Ping ───────────────────────────────────────────────────────────────────────

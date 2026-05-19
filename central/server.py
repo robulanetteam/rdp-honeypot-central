@@ -27,6 +27,7 @@ import urllib.request
 import urllib.parse
 from collections import Counter, defaultdict
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -839,6 +840,45 @@ async def api_deploy_preview(request: Request):
     }
 
 
+# ── Block-until metadata ───────────────────────────────────────────────────────
+
+def _load_block_meta() -> dict:
+    """Load {ip: block_until_iso_or_null} from blocklist_meta.json."""
+    meta_file = DEPLOY_PATH / "blocklist_meta.json"
+    if not meta_file.exists():
+        return {}
+    try:
+        return json.loads(meta_file.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_block_meta(meta: dict) -> None:
+    (DEPLOY_PATH / "blocklist_meta.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def _meta_from_analytics(rows) -> dict:
+    """Build {ip: block_until_iso} from analytics columns of submission rows."""
+    meta: dict = {}
+    for row in rows:
+        if not row["analytics"]:
+            continue
+        try:
+            an_list = json.loads(row["analytics"]) or []
+        except Exception:
+            continue
+        for entry in an_list:
+            ip = entry.get("source_ip")
+            bu = entry.get("block_until")
+            if ip and bu:
+                # Keep the latest (longest) block_until if multiple entries for same IP
+                if ip not in meta or bu > meta[ip]:
+                    meta[ip] = bu
+    return meta
+
+
 @app.post("/api/deploy")
 async def api_deploy(request: Request):
     """Merge all approved submissions → write blocklist files → mark as deployed."""
@@ -863,14 +903,30 @@ def _do_deploy_internal(triggered_by: Optional[str] = None) -> dict:
         wl = {r["ip"] for r in c.execute("SELECT ip FROM whitelist").fetchall()}
 
     ips: dict[str, str] = {}
+    now_ts = time.time()
 
-    # Seed with currently deployed IPs so we never lose previously approved addresses
+    # Load block_until metadata from previous deploys
+    meta = _load_block_meta()
+
+    # Update meta from new submission analytics (before seeding, so new data overrides old)
+    new_meta = _meta_from_analytics(rows)
+    meta.update(new_meta)
+
+    # Seed with currently deployed IPs — skip expired ones
     existing = DEPLOY_PATH / "blocklist.txt"
     if existing.exists():
         for line in existing.read_text(encoding="utf-8", errors="replace").splitlines():
             ip = line.strip()
-            if ip and not ip.startswith("#") and ip not in wl:
-                ips.setdefault(ip, "deployed")
+            if not ip or ip.startswith("#") or ip in wl:
+                continue
+            block_until = meta.get(ip)
+            if block_until:
+                try:
+                    if datetime.fromisoformat(block_until).timestamp() <= now_ts:
+                        continue  # expired — remove from list
+                except (ValueError, TypeError):
+                    pass
+            ips.setdefault(ip, "deployed")
 
     for row in rows:
         if row["blocklist"]:
@@ -879,7 +935,12 @@ def _do_deploy_internal(triggered_by: Optional[str] = None) -> dict:
                 if ip and not ip.startswith("#") and ip not in wl:
                     ips.setdefault(ip, row["label"])
 
+    # Ensure all IPs have a meta entry (null = no known expiry)
+    for ip in ips:
+        meta.setdefault(ip, None)
+
     DEPLOY_PATH.mkdir(parents=True, exist_ok=True)
+    _save_block_meta(meta)
     sorted_ips = sorted(ips.keys())
     sources    = sorted({v for v in ips.values()})
     generated  = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
@@ -954,6 +1015,82 @@ def _do_deploy_internal(triggered_by: Optional[str] = None) -> dict:
             "mikrotik":   "/pub/blocklist_mikrotik.rsc",
         },
         "from_submissions": sub_ids,
+    }
+
+
+@app.post("/api/deploy/prune")
+async def api_deploy_prune(request: Request):
+    """Remove expired IPs from deployed blocklist without requiring new submissions."""
+    require_admin(request)
+
+    meta = _load_block_meta()
+    if not meta:
+        return {"pruned": 0, "remaining": 0, "message": "No metadata — nothing to prune"}
+
+    with get_db() as c:
+        wl = {r["ip"] for r in c.execute("SELECT ip FROM whitelist").fetchall()}
+
+    now_ts = time.time()
+    existing = DEPLOY_PATH / "blocklist.txt"
+    if not existing.exists():
+        return {"pruned": 0, "remaining": 0, "message": "No deployed blocklist found"}
+
+    all_ips: list[str] = []
+    for line in existing.read_text(encoding="utf-8", errors="replace").splitlines():
+        ip = line.strip()
+        if ip and not ip.startswith("#") and ip not in wl:
+            all_ips.append(ip)
+
+    active: list[str] = []
+    pruned_count = 0
+    for ip in all_ips:
+        block_until = meta.get(ip)
+        if block_until:
+            try:
+                if datetime.fromisoformat(block_until).timestamp() <= now_ts:
+                    pruned_count += 1
+                    continue
+            except (ValueError, TypeError):
+                pass
+        active.append(ip)
+
+    if pruned_count == 0:
+        return {"pruned": 0, "remaining": len(active), "message": "No expired IPs found"}
+
+    sorted_ips = sorted(active)
+    generated  = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+
+    (DEPLOY_PATH / "blocklist.txt").write_text("\n".join(sorted_ips) + "\n")
+    pf_lines = [
+        "# Honeypot Central – pfBlockerNG blocklist",
+        f"# Generated : {generated}",
+        f"# IPs       : {len(sorted_ips)}", "",
+    ] + sorted_ips + [""]
+    (DEPLOY_PATH / "blocklist_pfblocker.txt").write_text("\n".join(pf_lines))
+    mt_lines = [
+        "# Honeypot Central – MikroTik address-list",
+        f"# Generated : {generated}",
+        f"# IPs       : {len(sorted_ips)}",
+        f"# List name : {MIKROTIK_LIST_NAME}", "",
+        f"/ip firewall address-list",
+        f"remove [find list={MIKROTIK_LIST_NAME}]",
+    ] + [f'add address={ip} list={MIKROTIK_LIST_NAME} comment="honeypot-central"'
+         for ip in sorted_ips] + [""]
+    (DEPLOY_PATH / "blocklist_mikrotik.rsc").write_text("\n".join(mt_lines))
+
+    # Clean meta: remove pruned IPs
+    for ip in all_ips:
+        if ip not in active and ip in meta:
+            del meta[ip]
+    _save_block_meta(meta)
+
+    write_log(None, "INFO", "prune_expired",
+              f"pruned={pruned_count} remaining={len(active)}")
+
+    return {
+        "pruned":    pruned_count,
+        "remaining": len(active),
+        "message":   f"Removed {pruned_count} expired IP(s), {len(active)} remain",
     }
 
 
