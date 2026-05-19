@@ -932,8 +932,17 @@ def _do_deploy_internal(triggered_by: Optional[str] = None) -> dict:
         if row["blocklist"]:
             for line in row["blocklist"].splitlines():
                 ip = line.strip()
-                if ip and not ip.startswith("#") and ip not in wl:
-                    ips.setdefault(ip, row["label"])
+                if not ip or ip.startswith("#") or ip in wl:
+                    continue
+                # Skip if IP is already known to be expired
+                block_until = meta.get(ip)
+                if block_until:
+                    try:
+                        if datetime.fromisoformat(block_until).timestamp() <= now_ts:
+                            continue  # expired — do not re-add from submission
+                    except (ValueError, TypeError):
+                        pass
+                ips.setdefault(ip, row["label"])
 
     # Ensure all IPs have a meta entry (null = no known expiry)
     for ip in ips:
