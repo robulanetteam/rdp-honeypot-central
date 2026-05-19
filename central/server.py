@@ -138,6 +138,9 @@ for _mig in [
     "ALTER TABLE nodes ADD COLUMN auto_score_threshold REAL    DEFAULT 70",
     "ALTER TABLE submissions ADD COLUMN score          REAL",
     "ALTER TABLE nodes ADD COLUMN last_error           TEXT",
+    "ALTER TABLE nodes ADD COLUMN agent_version        TEXT",
+    "ALTER TABLE nodes ADD COLUMN last_auto_approved_at REAL",
+    "ALTER TABLE nodes ADD COLUMN last_auto_deployed_at REAL",
 ]:
     try:
         with get_db() as _c:
@@ -287,9 +290,10 @@ def calculate_score(blocklist: str, analytics: list | None, deployed_ips: set) -
 # ── Models ─────────────────────────────────────────────────────────────────────
 
 class SubmitPayload(BaseModel):
-    node_id:   str
-    blocklist: Optional[str] = None   # raw text content of blocklist.txt
-    analytics: Optional[list] = None  # list of analytics event dicts
+    node_id:       str
+    blocklist:     Optional[str]  = None   # raw text content of blocklist.txt
+    analytics:     Optional[list] = None   # list of analytics event dicts
+    agent_version: Optional[str]  = None   # e.g. "1.0.1"
 
 
 class NodeAutoConfig(BaseModel):
@@ -402,10 +406,16 @@ async def api_submit(
 
     with get_db() as c:
         # Update heartbeat + clear last_error on successful contact
-        c.execute(
-            "UPDATE nodes SET last_seen=unixepoch(), last_ip=?, last_error=NULL WHERE id=?",
-            (request.client.host, node["id"]),
-        )
+        if payload.agent_version:
+            c.execute(
+                "UPDATE nodes SET last_seen=unixepoch(), last_ip=?, last_error=NULL, agent_version=? WHERE id=?",
+                (request.client.host, payload.agent_version, node["id"]),
+            )
+        else:
+            c.execute(
+                "UPDATE nodes SET last_seen=unixepoch(), last_ip=?, last_error=NULL WHERE id=?",
+                (request.client.host, node["id"]),
+            )
 
         # Skip duplicate (same content already pending/approved)
         dup = c.execute(
@@ -457,6 +467,8 @@ async def api_submit(
                 "UPDATE submissions SET status='approved', reviewed_at=unixepoch() WHERE id=?",
                 (sub_id,),
             )
+        with get_db() as c:
+            c.execute("UPDATE nodes SET last_auto_approved_at=unixepoch() WHERE id=?", (node["id"],))
         write_log(node["id"], "INFO", "auto_approved",
                   f"sub_id={sub_id} score={score} threshold={threshold}")
 
@@ -473,6 +485,8 @@ async def api_submit(
         if auto_deploy:
             try:
                 dr = _do_deploy_internal(triggered_by=node["id"])
+                with get_db() as c:
+                    c.execute("UPDATE nodes SET last_auto_deployed_at=unixepoch() WHERE id=?", (node["id"],))
                 return {
                     "status":        "auto_deployed",
                     "submission_id": sub_id,
@@ -483,6 +497,7 @@ async def api_submit(
                 write_log(node["id"], "WARN", "auto_deploy_failed",
                           f"sub_id={sub_id} error={str(_e)[:200]}")
         return {"status": "auto_approved", "submission_id": sub_id, "score": score}
+
 
     return {"status": "accepted", "submission_id": sub_id, "score": score}
 

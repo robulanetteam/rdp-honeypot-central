@@ -476,6 +476,23 @@ async function loadNodes() {
           <span>Approved</span>
           <span class="text-green-400">${n.approved_count ?? 0}</span>
         </div>
+        <div class="flex justify-between border-t border-gray-700 pt-1 mt-1">
+          <span>Agent version</span>
+          <span class="text-gray-300 font-mono">${n.agent_version ? esc(n.agent_version) : '<span class="text-gray-600">unknown</span>'}</span>
+        </div>
+        ${(n.last_auto_approved_at || n.last_auto_deployed_at) ? `
+        <div class="border-t border-gray-700 pt-1 mt-1 space-y-1">
+          ${n.last_auto_approved_at ? `
+          <div class="flex justify-between">
+            <span class="text-cyan-500">Auto-approved</span>
+            <span class="text-cyan-300">${fmtAgo(Math.floor(Date.now()/1000 - n.last_auto_approved_at))}</span>
+          </div>` : ''}
+          ${n.last_auto_deployed_at ? `
+          <div class="flex justify-between">
+            <span class="text-green-500">Auto-deployed</span>
+            <span class="text-green-300">${fmtAgo(Math.floor(Date.now()/1000 - n.last_auto_deployed_at))}</span>
+          </div>` : ''}
+        </div>` : ''}
         ${n.last_error ? `
         <div class="border-t border-gray-700 pt-1 mt-1">
           <p class="text-red-400 font-bold text-xs">⚠ Last error</p>
