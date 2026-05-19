@@ -511,11 +511,22 @@ async def api_heartbeat(
 ):
     """Lightweight heartbeat – updates last_seen without a full submission."""
     node = node_from_token(x_node_token)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    agent_version = body.get("agent_version") if body else None
     with get_db() as c:
-        c.execute(
-            "UPDATE nodes SET last_seen=unixepoch(), last_ip=?, last_error=NULL WHERE id=?",
-            (request.client.host, node["id"]),
-        )
+        if agent_version:
+            c.execute(
+                "UPDATE nodes SET last_seen=unixepoch(), last_ip=?, last_error=NULL, agent_version=? WHERE id=?",
+                (request.client.host, agent_version, node["id"]),
+            )
+        else:
+            c.execute(
+                "UPDATE nodes SET last_seen=unixepoch(), last_ip=?, last_error=NULL WHERE id=?",
+                (request.client.host, node["id"]),
+            )
         row = c.execute("SELECT pending_cmd FROM nodes WHERE id=?", (node["id"],)).fetchone()
         pending_cmd = row["pending_cmd"] if row else None
         if pending_cmd:
