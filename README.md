@@ -35,21 +35,20 @@ IMAGE=ghcr.io/robulanetteam/honeypot-central:latest docker compose up -d
 
 В веб-интерфейсе: **Settings → Register New Node** → введите ID (например `rdp-home`) и метку → скопируйте токен.
 
-### 3. Установка агента на ноде
+### 3. Подключение ноды к Central
 
-```bash
-# Скопируйте папку agent/ на сервер с honeypot, затем:
-sudo bash agent/install.sh
-```
-
-Добавьте в `.env` вашего honeypot:
+Агент встроен в контейнер honeypot — устанавливать ничего на хосте не нужно.
+Добавьте переменные в `.env` ноды и перезапустите контейнер:
 
 ```env
 CENTRAL_URL=https://your-server:8100
 CENTRAL_NODE_ID=rdp-home
 CENTRAL_TOKEN=<токен из UI>
-CENTRAL_DATA_DIR=/path/to/honeypot/data
 CENTRAL_INSECURE=1   # для self-signed сертификата
+```
+
+```bash
+docker compose restart
 ```
 
 ### 4. Рабочий цикл
@@ -160,16 +159,15 @@ CENTRAL_DATA_DIR=/home/homeserver/rdp_honeypot/rdp_honeypot/data
 CENTRAL_INSECURE=1
 ```
 
-### 3. Установите агент
+### 3. Запустите агент
+
+Агент встроен в Docker-образ honeypot и запускается автоматически при старте контейнера через supervisord — ничего устанавливать на хосте не нужно.
+
+После добавления переменных в `.env` достаточно:
 
 ```bash
-# скопируйте папку agent/ на ноду, затем:
-sudo bash agent/install.sh
-# установщик автоматически найдёт .env, или укажите путь явно:
-sudo ENV_FILE=/path/to/.env bash agent/install.sh
+docker compose restart
 ```
-
-Устанавливает `/opt/honeypot-agent/agent.py` и systemd-таймер с запуском каждые 15 минут.
 
 ### Переменные окружения агента
 
@@ -178,21 +176,20 @@ sudo ENV_FILE=/path/to/.env bash agent/install.sh
 | `CENTRAL_URL` | ✓ | — | URL центрального сервера (`https://...`) |
 | `CENTRAL_NODE_ID` | ✓ | — | ID ноды (должен совпадать с зарегистрированным в UI) |
 | `CENTRAL_TOKEN` | ✓ | — | Токен авторизации из UI |
-| `CENTRAL_DATA_DIR` | ✓ | — | Путь к папке `data/` honeypot |
 | `CENTRAL_INSECURE` | | `0` | `1` — отключить проверку TLS-сертификата (для self-signed) |
 | `CENTRAL_ANALYTICS_DAYS` | | `7` | За сколько дней включать аналитику |
 
-### Ручной запуск / отладка
+### Отладка агента
 
 ```bash
-python3 /opt/honeypot-agent/agent.py
+# логи агента внутри контейнера honeypot:
+docker logs rdp-honeypot 2>&1 | grep -i central
 
-# только heartbeat (без загрузки данных):
-python3 /opt/honeypot-agent/agent.py --heartbeat
+# запустить агент вручную (разово):
+docker exec rdp-honeypot python3 /app/agent.py
 
-# статус таймера:
-systemctl status honeypot-agent.timer
-journalctl -u honeypot-agent.service -n 30
+# только heartbeat:
+docker exec rdp-honeypot python3 /app/agent.py --heartbeat
 ```
 
 ---
@@ -237,10 +234,9 @@ central/
   docker-entrypoint.sh   ← генерация TLS-сертификата + запуск uvicorn
   .env.example
 agent/
-  agent.py               ← агент для honeypot-ноды
-  install.sh             ← установщик (systemd)
-  honeypot-agent.service
-  honeypot-agent.timer
+  agent.py               ← агент (встроен в контейнер honeypot, запускается через supervisord)
+  agent_loop.sh          ← цикл запуска агента внутри контейнера
+  install.sh             ← устаревший установщик (systemd), не нужен при использовании rdp_honeypot
   .env.example           ← переменные для добавления в .env honeypot
 .github/workflows/
   docker.yml             ← GitHub Actions CI/CD (multi-arch)
