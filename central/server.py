@@ -718,8 +718,16 @@ async def api_get_submissions(request: Request, status: str = "pending"):
     allowed = {"pending", "approved", "rejected", "deployed"}
     if status not in allowed:
         raise HTTPException(400, "Invalid status")
+    # "approved" tab shows approval history: both approved-and-waiting and already-deployed
+    # (auto-approve+deploy transitions approved→deployed instantly, leaving tab empty otherwise)
+    if status == "approved":
+        where_clause = "s.status IN ('approved', 'deployed')"
+        params: tuple = ()
+    else:
+        where_clause = "s.status = ?"
+        params = (status,)
     with get_db() as c:
-        rows = c.execute("""
+        rows = c.execute(f"""
             SELECT s.id, s.node_id, s.submitted_at, s.content_hash,
                    s.status, s.reviewed_at, s.note, s.score,
                    n.label AS node_label,
@@ -728,10 +736,10 @@ async def api_get_submissions(request: Request, status: str = "pending"):
                         THEN json_array_length(s.analytics) END AS analytics_count
             FROM submissions s
             JOIN nodes n ON s.node_id = n.id
-            WHERE s.status = ?
+            WHERE {where_clause}
             ORDER BY s.submitted_at DESC
             LIMIT 500
-        """, (status,)).fetchall()
+        """, params).fetchall()
     return [dict(r) for r in rows]
 
 
