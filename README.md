@@ -10,6 +10,63 @@
 Нода N ──┘
 ```
 
+## Quick Start
+
+> Полные детали — в разделах ниже. Здесь — минимальный путь от нуля до работающей системы.
+
+### 1. Центральный сервер (5 минут)
+
+```bash
+git clone https://github.com/robulanetteam/rdp-honeypot-central
+cd rdp-honeypot-central/central
+
+# Создайте .env и задайте токен администратора
+cp .env.example .env
+echo "ADMIN_TOKEN=$(openssl rand -hex 32)" >> .env
+
+# Запустите контейнер
+IMAGE=ghcr.io/robulanetteam/honeypot-central:latest docker compose up -d
+```
+
+Откройте `https://your-server:8100` → введите токен из `.env` → вы в интерфейсе.
+Браузер покажет предупреждение о self-signed сертификате — нажмите «Продолжить».
+
+### 2. Регистрация ноды
+
+В веб-интерфейсе: **Settings → Register New Node** → введите ID (например `rdp-home`) и метку → скопируйте токен.
+
+### 3. Установка агента на ноде
+
+```bash
+# Скопируйте папку agent/ на сервер с honeypot, затем:
+sudo bash agent/install.sh
+```
+
+Добавьте в `.env` вашего honeypot:
+
+```env
+CENTRAL_URL=https://your-server:8100
+CENTRAL_NODE_ID=rdp-home
+CENTRAL_TOKEN=<токен из UI>
+CENTRAL_DATA_DIR=/path/to/honeypot/data
+CENTRAL_INSECURE=1   # для self-signed сертификата
+```
+
+### 4. Рабочий цикл
+
+1. Агент каждые 15 мин отправляет данные → вкладка **Submissions** показывает *pending*
+2. Откройте submision: просмотрите аналитику, пересечения с deployed IP, отредактируйте блоклист при необходимости
+3. Нажмите **Approve** → **Deploy**
+4. Готово — объединённый блоклист доступен по `https://your-server:8100/pub/`
+
+| URL | Формат |
+|-----|--------|
+| `/pub/blocklist.txt` | один IP на строку |
+| `/pub/blocklist_pfblocker.txt` | pfBlockerNG |
+| `/pub/blocklist_mikrotik.rsc` | MikroTik RouterOS |
+
+---
+
 ## Возможности
 
 - **HTTPS из коробки** — при старте контейнера автоматически генерируется самоподписанный сертификат на 10 лет; опционально — сертификат Let's Encrypt через certbot
