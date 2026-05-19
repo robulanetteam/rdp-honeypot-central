@@ -18,6 +18,7 @@ import json
 import hashlib
 import os
 import secrets
+import signal
 import sqlite3
 import time
 import asyncio
@@ -31,7 +32,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -141,6 +142,7 @@ for _mig in [
     "ALTER TABLE nodes ADD COLUMN agent_version        TEXT",
     "ALTER TABLE nodes ADD COLUMN last_auto_approved_at REAL",
     "ALTER TABLE nodes ADD COLUMN last_auto_deployed_at REAL",
+    "ALTER TABLE nodes ADD COLUMN pending_cmd          TEXT",
 ]:
     try:
         with get_db() as _c:
@@ -514,8 +516,21 @@ async def api_heartbeat(
             "UPDATE nodes SET last_seen=unixepoch(), last_ip=?, last_error=NULL WHERE id=?",
             (request.client.host, node["id"]),
         )
+        row = c.execute("SELECT pending_cmd FROM nodes WHERE id=?", (node["id"],)).fetchone()
+        pending_cmd = row["pending_cmd"] if row else None
+        if pending_cmd:
+            c.execute("UPDATE nodes SET pending_cmd=NULL WHERE id=?", (node["id"],))
     write_log(node["id"], "INFO", "heartbeat", f"ip={request.client.host}")
-    return {"ok": True}
+    resp: dict = {"ok": True}
+    if pending_cmd == "restart":
+        resp["cmd"] = "restart"
+        write_log(node["id"], "INFO", "cmd_delivered", "restart")
+    elif pending_cmd == "update_agent":
+        agent_url = str(request.url).split("/api/")[0] + "/pub/agent_dist/agent.py"
+        resp["cmd"] = "update_agent"
+        resp["agent_url"] = agent_url
+        write_log(node["id"], "INFO", "cmd_delivered", "update_agent")
+    return resp
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ADMIN API
@@ -1202,3 +1217,97 @@ async def api_connections(request: Request, limit: int = 2000):
 
     events = sorted(seen.values(), key=lambda x: (x["ts"] or 0), reverse=True)
     return events[:limit]
+
+
+# ── Node commands (restart / update_agent) ────────────────────────────────────
+
+@app.post("/api/nodes/{node_id}/cmd")
+async def api_node_cmd(node_id: str, request: Request):
+    """Queue a command for a node (restart or update_agent). Delivered on next heartbeat."""
+    require_admin(request)
+    body = await request.json()
+    cmd = body.get("cmd", "")
+    if cmd not in ("restart", "update_agent"):
+        raise HTTPException(400, "cmd must be 'restart' or 'update_agent'")
+    if cmd == "update_agent":
+        dist = DEPLOY_PATH / "agent_dist" / "agent.py"
+        if not dist.exists():
+            raise HTTPException(400, "No agent distribution uploaded yet")
+    with get_db() as c:
+        row = c.execute("SELECT id FROM nodes WHERE id=?", (node_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Node not found")
+        c.execute("UPDATE nodes SET pending_cmd=? WHERE id=?", (cmd, node_id))
+    write_log(node_id, "INFO", "cmd_queued", f"cmd={cmd}")
+    return {"queued": cmd, "node_id": node_id}
+
+
+# ── Agent distribution upload ─────────────────────────────────────────────────
+
+@app.post("/api/agent-dist")
+async def api_upload_agent_dist(request: Request, file: UploadFile = File(...)):
+    """Upload a new agent.py to serve as distribution for honeypot nodes."""
+    require_admin(request)
+    if file.filename and not file.filename.endswith(".py"):
+        raise HTTPException(400, "Only .py files accepted")
+    content = await file.read()
+    if len(content) > 500_000:
+        raise HTTPException(400, "File too large (max 500 KB)")
+    # Basic sanity: must look like Python
+    if b"def " not in content and b"import " not in content:
+        raise HTTPException(400, "File does not appear to be Python source")
+    dist_dir = DEPLOY_PATH / "agent_dist"
+    dist_dir.mkdir(parents=True, exist_ok=True)
+    (dist_dir / "agent.py").write_bytes(content)
+    # Extract AGENT_VERSION from the file if present
+    version = "unknown"
+    for line in content.decode(errors="replace").splitlines():
+        if line.strip().startswith("AGENT_VERSION"):
+            try:
+                version = line.split("=")[1].strip().strip("\"'")
+            except Exception:
+                pass
+            break
+    write_log(None, "INFO", "agent_dist_uploaded", f"size={len(content)} version={version}")
+    return {"ok": True, "version": version, "size": len(content)}
+
+
+@app.get("/api/agent-dist/info")
+async def api_agent_dist_info(request: Request):
+    """Return info about the currently uploaded agent distribution."""
+    require_admin(request)
+    dist = DEPLOY_PATH / "agent_dist" / "agent.py"
+    if not dist.exists():
+        return {"available": False}
+    stat = dist.stat()
+    content = dist.read_text(errors="replace")
+    version = "unknown"
+    for line in content.splitlines():
+        if line.strip().startswith("AGENT_VERSION"):
+            try:
+                version = line.split("=")[1].strip().strip("\"'")
+            except Exception:
+                pass
+            break
+    return {
+        "available": True,
+        "version":   version,
+        "size":      stat.st_size,
+        "updated_at": stat.st_mtime,
+    }
+
+
+# ── Central self-restart ──────────────────────────────────────────────────────
+
+async def _delayed_restart():
+    await asyncio.sleep(1.2)
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+@app.post("/api/admin/restart-central")
+async def api_restart_central(request: Request):
+    """Send SIGTERM to the current process (supervisord/Docker will restart it)."""
+    require_admin(request)
+    write_log(None, "WARN", "central_restart", "admin triggered restart")
+    asyncio.create_task(_delayed_restart())
+    return {"ok": True, "message": "Central restarting in ~1 second"}

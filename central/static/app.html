@@ -269,6 +269,29 @@
         </div>
 
         <div class="bg-gray-800 rounded-xl border border-gray-700 p-5">
+          <h2 class="font-bold text-orange-400 mb-3">Agent Distribution</h2>
+          <p class="text-xs text-gray-500 mb-3">Загрузите новый <code class="text-gray-400">agent.py</code>. После загрузки нажмите «Update agent» на нужных нодах — они обновятся при следующем heartbeat.</p>
+          <div id="agent-dist-info" class="mb-3 text-xs text-gray-500">Загрузка...</div>
+          <input type="file" id="agent-dist-file" accept=".py"
+            class="block w-full text-xs text-gray-400 mb-2 file:mr-2 file:py-1 file:px-3 file:rounded file:border-0 file:text-xs file:bg-gray-700 file:text-gray-300 hover:file:bg-gray-600">
+          <button onclick="uploadAgentDist()"
+            class="w-full bg-blue-700 hover:bg-blue-600 text-white rounded px-3 py-1.5 text-sm font-bold transition-colors">
+            Upload agent.py
+          </button>
+          <p id="agent-dist-msg" class="text-xs mt-2 hidden"></p>
+        </div>
+
+        <div class="bg-gray-800 rounded-xl border border-orange-900 p-5">
+          <h2 class="font-bold text-orange-400 mb-1">Central Server</h2>
+          <p class="text-xs text-gray-500 mb-3">Перезапустить процесс central (supervisord/Docker поднимет заново).</p>
+          <button onclick="restartCentral()"
+            class="w-full bg-red-900 hover:bg-red-800 text-red-300 rounded px-3 py-1.5 text-sm font-bold transition-colors">
+            Restart Central
+          </button>
+          <p id="central-restart-msg" class="text-xs mt-2 hidden"></p>
+        </div>
+
+        <div class="bg-gray-800 rounded-xl border border-gray-700 p-5">
           <h2 class="font-bold text-orange-400 mb-3">Telegram Notifications</h2>
           <p class="text-xs text-gray-500 mb-3">Уведомления при авто-approve и deploy: кол-во IP, страны, bruteforcers, scanners.</p>
           <div class="space-y-2">
@@ -518,6 +541,19 @@ async function loadNodes() {
           Auto
         </button>
       </div>
+      <div class="mt-2 flex gap-2">
+        <button onclick="nodeCmd('${esc(n.id)}', 'restart', this)"
+          class="flex-1 bg-yellow-900 hover:bg-yellow-800 text-yellow-300 rounded px-2 py-1 text-xs transition-colors"
+          title="Перезапустить агент на ноде (на следующем heartbeat)">
+          Restart
+        </button>
+        <button onclick="nodeCmd('${esc(n.id)}', 'update_agent', this)"
+          class="flex-1 bg-blue-900 hover:bg-blue-800 text-blue-300 rounded px-2 py-1 text-xs transition-colors"
+          title="Отправить агенту команду обновиться из дистрибутива (на следующем heartbeat)">
+          Update agent
+        </button>
+      </div>
+      <p id="cmd-msg-${esc(n.id)}" class="text-xs mt-1 hidden"></p>
       <div id="auto-form-${esc(n.id)}" class="hidden mt-2 text-xs bg-gray-900 rounded p-3 space-y-2">
         <div class="flex items-center justify-between">
           <label class="text-gray-400">Auto-approve</label>
@@ -1076,7 +1112,89 @@ async function pingNode(nodeId, ip, btn) {
   btn.disabled = false;
 }
 
-// ── Logs ───────────────────────────────────────────────────────────────────────
+async function nodeCmd(nodeId, cmd, btn) {
+  const msg = document.getElementById(`cmd-msg-${nodeId}`);
+  const origText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '…';
+  msg.classList.add('hidden');
+  try {
+    await api('POST', `/api/nodes/${encodeURIComponent(nodeId)}/cmd`, {cmd});
+    msg.textContent = `✓ Команда "${cmd}" поставлена в очередь — выполнится на следующем heartbeat`;
+    msg.className = 'text-xs mt-1 text-green-400';
+    msg.classList.remove('hidden');
+  } catch(e) {
+    msg.textContent = '✗ ' + e.message;
+    msg.className = 'text-xs mt-1 text-red-400';
+    msg.classList.remove('hidden');
+  }
+  btn.disabled = false;
+  btn.textContent = origText;
+  setTimeout(() => msg.classList.add('hidden'), 6000);
+}
+
+async function loadAgentDistInfo() {
+  const el = document.getElementById('agent-dist-info');
+  if (!el) return;
+  try {
+    const r = await api('GET', '/api/agent-dist/info');
+    if (r.available) {
+      const d = new Date(r.updated_at * 1000).toLocaleString();
+      el.innerHTML = `<span class="text-green-400 font-bold">v${esc(r.version)}</span> &nbsp;·&nbsp; ${r.size} bytes &nbsp;·&nbsp; обновлён ${d}`;
+    } else {
+      el.textContent = 'Дистрибутив не загружен';
+    }
+  } catch(e) {
+    el.textContent = 'Ошибка загрузки информации';
+  }
+}
+
+async function uploadAgentDist() {
+  const fileInput = document.getElementById('agent-dist-file');
+  const msg = document.getElementById('agent-dist-msg');
+  if (!fileInput.files.length) { alert('Выберите файл agent.py'); return; }
+  const formData = new FormData();
+  formData.append('file', fileInput.files[0]);
+  msg.textContent = 'Загрузка…';
+  msg.className = 'text-xs mt-2 text-gray-400';
+  msg.classList.remove('hidden');
+  try {
+    const resp = await fetch('/api/agent-dist', {
+      method: 'POST',
+      headers: { 'X-Admin-Token': ADMIN_TOKEN },
+      body: formData,
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({detail: resp.statusText}));
+      throw new Error(err.detail || resp.statusText);
+    }
+    const r = await resp.json();
+    msg.textContent = `✓ Загружен v${r.version} (${r.size} bytes). Теперь нажмите "Update agent" на нужных нодах.`;
+    msg.className = 'text-xs mt-2 text-green-400';
+    fileInput.value = '';
+    loadAgentDistInfo();
+  } catch(e) {
+    msg.textContent = '✗ ' + e.message;
+    msg.className = 'text-xs mt-2 text-red-400';
+  }
+}
+
+async function restartCentral() {
+  if (!confirm('Перезапустить central server?')) return;
+  const msg = document.getElementById('central-restart-msg');
+  msg.textContent = 'Отправка команды…';
+  msg.className = 'text-xs mt-2 text-gray-400';
+  msg.classList.remove('hidden');
+  try {
+    const r = await api('POST', '/api/admin/restart-central');
+    msg.textContent = `✓ ${r.message}`;
+    msg.className = 'text-xs mt-2 text-yellow-400';
+  } catch(e) {
+    msg.textContent = '✗ ' + e.message;
+    msg.className = 'text-xs mt-2 text-red-400';
+  }
+}
+
 
 let logsNodeFilter = '';
 
@@ -1187,6 +1305,7 @@ async function delWhitelist(ip) {
 
 async function loadSettingsNodes() {
   loadTelegramSettings();
+  loadAgentDistInfo();
   const nodes = await api('GET', '/api/nodes').catch(() => []);
   const el = document.getElementById('settings-nodes-list');
   el.innerHTML = nodes.length
