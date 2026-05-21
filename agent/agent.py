@@ -19,6 +19,7 @@ Cache:  /var/lib/honeypot-agent/last_hash  (skip re-submit if data unchanged)
 """
 
 import hashlib
+import gzip
 import json
 import os
 import ssl
@@ -70,11 +71,54 @@ def read_blocklist(data_dir: Path) -> str:
     return p.read_text(encoding="utf-8", errors="replace").strip()
 
 
+def _rotate_analytics_log(p: Path, max_bytes: int = 5 * 1024 * 1024, keep_days: int = 1):
+    """If analytics.jsonl exceeds max_bytes, gzip-archive it and keep only recent entries."""
+    try:
+        if p.stat().st_size <= max_bytes:
+            return
+        cutoff = time.time() - keep_days * 86400
+        # Read all lines, split into recent (keep) and old (archive)
+        recent_lines = []
+        old_lines = []
+        import datetime
+        with p.open(encoding="utf-8", errors="replace") as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                keep = False
+                try:
+                    obj = json.loads(stripped)
+                    ts = obj.get("timestamp") or obj.get("ts") or obj.get("time")
+                    if ts is None:
+                        keep = True
+                    elif isinstance(ts, (int, float)):
+                        keep = ts >= cutoff
+                    else:
+                        ts_epoch = datetime.datetime.fromisoformat(str(ts)[:19]).replace(
+                            tzinfo=datetime.timezone.utc).timestamp()
+                        keep = ts_epoch >= cutoff
+                except Exception:
+                    keep = True
+                (recent_lines if keep else old_lines).append(stripped)
+        # Archive old lines to a gzipped file
+        archive_name = p.parent / f"analytics.{time.strftime('%Y%m%d_%H%M%S')}.jsonl.gz"
+        with gzip.open(archive_name, "wt", encoding="utf-8") as gz:
+            for line in old_lines:
+                gz.write(line + "\n")
+        # Rewrite analytics.jsonl with only recent lines
+        p.write_text("\n".join(recent_lines) + ("\n" if recent_lines else ""), encoding="utf-8")
+        log("INFO", f"Log rotated: archived {len(old_lines)} old events → {archive_name.name}, kept {len(recent_lines)} recent")
+    except Exception as e:
+        log("WARN", f"Log rotation failed: {e}")
+
+
 def read_analytics(data_dir: Path, days: int = 7) -> list:
     """Return analytics events from the last `days` days."""
     p = data_dir / "logs" / "analytics.jsonl"
     if not p.exists():
         return []
+    _rotate_analytics_log(p)
     cutoff = time.time() - days * 86400
     events = []
     try:
