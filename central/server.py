@@ -16,6 +16,7 @@ Env vars:
 
 import json
 import hashlib
+import time
 import os
 import secrets
 import signal
@@ -517,6 +518,45 @@ async def api_submit(
 
 
     return {"status": "accepted", "submission_id": sub_id, "score": score}
+
+
+@app.post("/api/tg/relay")
+async def api_tg_relay(
+    request: Request,
+    x_node_token: str = Header(...),
+):
+    """Relay a Telegram notification from a honeypot node through the central server.
+    Node sends: {"text": "...", "node_id": "..."}
+    Central prepends the node label and forwards via notify_telegram().
+    Deduplication: identical (node_id, text) ignored within 60 seconds.
+    """
+    node = node_from_token(x_node_token)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    text = str(body.get("text", "")).strip()
+    if not text:
+        raise HTTPException(400, "text is required")
+
+    # Simple dedup: store hash of (node_id, text) with TTL=60s
+    dedup_key = hashlib.sha256(f"{node['id']}:{text}".encode()).hexdigest()
+    now_ts = time.time()
+    # Clean old entries and check
+    _tg_relay_dedup[dedup_key] = _tg_relay_dedup.get(dedup_key, 0)
+    if now_ts - _tg_relay_dedup.get(dedup_key, 0) < 60:
+        return {"status": "dedup_skip"}
+    _tg_relay_dedup[dedup_key] = now_ts
+
+    label = node.get("label") or node["id"]
+    full_text = f"[<b>{label}</b>]\n{text}"
+    notify_telegram(full_text)
+    write_log(node["id"], "INFO", "tg_relay", text[:200])
+    return {"status": "sent"}
+
+
+# In-memory dedup store for tg relay (node_id+text hash -> timestamp)
+_tg_relay_dedup: dict = {}
 
 
 @app.post("/api/heartbeat")
