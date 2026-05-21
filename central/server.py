@@ -29,7 +29,7 @@ import urllib.request
 import urllib.parse
 from collections import Counter, defaultdict
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -1105,9 +1105,29 @@ def _save_block_meta(meta: dict) -> None:
     )
 
 
+def _scope_to_days(scope: int) -> int:
+    if scope >= 70: return 60
+    if scope >= 50: return 30
+    if scope >= 25: return 7
+    return 0
+
+
+def _get_bu(val) -> Optional[str]:
+    """Extract block_until ISO string from either old (str) or new (dict) meta format."""
+    if val is None:
+        return None
+    if isinstance(val, str):
+        return val
+    return val.get("until")
+
+
 def _meta_from_analytics(rows) -> dict:
-    """Build {ip: block_until_iso} from analytics columns of submission rows."""
+    """Build {ip: meta_entry} from analytics columns of submission rows.
+    meta_entry = {"until": ISO, "at": ISO, "score": int, "days": int}
+    Keeps the entry with the LONGEST block_until per IP.
+    """
     meta: dict = {}
+    now_iso = datetime.now(tz=timezone.utc).isoformat()
     for row in rows:
         if not row["analytics"]:
             continue
@@ -1119,10 +1139,21 @@ def _meta_from_analytics(rows) -> dict:
             ip = entry.get("source_ip")
             bu = entry.get("block_until")
             if ip and bu:
-                # Keep the latest (longest) block_until if multiple entries for same IP
-                if ip not in meta or bu > meta[ip]:
-                    meta[ip] = bu
+                score = int(entry.get("scope") or 0)
+                days  = _scope_to_days(score)
+                if ip not in meta or bu > _get_bu(meta[ip]):
+                    meta[ip] = {"until": bu, "at": now_iso, "score": score, "days": days}
     return meta
+
+
+def _meta_merge(meta: dict, new_meta: dict) -> None:
+    """Merge new_meta into meta, keeping the LONGEST block_until per IP."""
+    for ip, new_val in new_meta.items():
+        new_bu = _get_bu(new_val)
+        old_bu = _get_bu(meta.get(ip))
+        if old_bu is None or (new_bu and new_bu > old_bu):
+            meta[ip] = new_val
+        # else: keep old (longer) entry as-is
 
 
 @app.post("/api/deploy")
@@ -1154,9 +1185,9 @@ def _do_deploy_internal(triggered_by: Optional[str] = None) -> dict:
     # Load block_until metadata from previous deploys
     meta = _load_block_meta()
 
-    # Update meta from new submission analytics (before seeding, so new data overrides old)
+    # Update meta from new submission analytics — keep longest block_until per IP
     new_meta = _meta_from_analytics(rows)
-    meta.update(new_meta)
+    _meta_merge(meta, new_meta)
 
     # Seed with currently deployed IPs — skip expired ones
     existing = DEPLOY_PATH / "blocklist.txt"
@@ -1166,7 +1197,7 @@ def _do_deploy_internal(triggered_by: Optional[str] = None) -> dict:
             ip = line.strip()
             if not ip or ip.startswith("#") or ip in wl:
                 continue
-            block_until = meta.get(ip)
+            block_until = _get_bu(meta.get(ip))
             if block_until:
                 try:
                     if datetime.fromisoformat(block_until).timestamp() <= now_ts:
@@ -1183,7 +1214,7 @@ def _do_deploy_internal(triggered_by: Optional[str] = None) -> dict:
                 if not ip or ip.startswith("#") or ip in wl:
                     continue
                 # Skip if IP is already known to be expired
-                block_until = meta.get(ip)
+                block_until = _get_bu(meta.get(ip))
                 if block_until:
                     try:
                         if datetime.fromisoformat(block_until).timestamp() <= now_ts:
@@ -1278,7 +1309,7 @@ def _do_deploy_internal(triggered_by: Optional[str] = None) -> dict:
     _new_with_info = []
     for _ip in _new_ips:
         _inf = _ip_info.get(_ip, {})
-        _bu  = meta.get(_ip)  # block_until ISO string or None
+        _bu  = _get_bu(meta.get(_ip))  # block_until ISO string or None
         _bu_short = ""
         if _bu:
             try:
@@ -1345,7 +1376,7 @@ def _do_prune_internal() -> dict:
     active: list[str] = []
     pruned_ips: list[tuple] = []  # (ip, block_until_iso)
     for ip in all_ips:
-        block_until = meta.get(ip)
+        block_until = _get_bu(meta.get(ip))
         if block_until:
             try:
                 if datetime.fromisoformat(block_until).timestamp() <= now_ts:
@@ -1457,12 +1488,25 @@ async def api_blocklist_expiry(request: Request):
             }
 
     entries = []
-    for ip, bu in meta.items():
+    for ip, val in meta.items():
+        bu = _get_bu(val)
+        if not bu:
+            continue
         try:
             bu_ts = datetime.fromisoformat(bu).timestamp()
         except Exception:
             continue
         remaining_days = max(0, round((bu_ts - now_ts) / 86400, 1))
+        # Extra fields from new-format meta entries
+        blocked_at_iso  = val.get("at")  if isinstance(val, dict) else None
+        block_score     = val.get("score") if isinstance(val, dict) else None
+        block_days      = val.get("days")  if isinstance(val, dict) else None
+        blocked_at_fmt  = ""
+        if blocked_at_iso:
+            try:
+                blocked_at_fmt = datetime.fromisoformat(blocked_at_iso).strftime("%d.%m.%Y")
+            except Exception:
+                pass
         an = _ip_an.get(ip, {})
         entries.append({
             "ip":              ip,
@@ -1470,10 +1514,15 @@ async def api_blocklist_expiry(request: Request):
             "block_until_fmt": datetime.fromisoformat(bu).strftime("%d.%m.%Y"),
             "remaining_days":  remaining_days,
             "expired":         bu_ts <= now_ts,
+            # Analytics (current)
             "node_id":         an.get("node_id", ""),
             "node_label":      an.get("node_label", "—"),
             "scope":           an.get("scope", 0),
             "cls":             an.get("cls", "unknown"),
+            # Block origin (at deploy time)
+            "blocked_at":      blocked_at_fmt,
+            "block_score":     block_score,
+            "block_days":      block_days,
         })
     entries.sort(key=lambda x: x["block_until"])
     next_expiry = None
