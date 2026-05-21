@@ -225,6 +225,12 @@ def main():
     log("INFO", f"Agent starting for node={cfg['node_id']}")
 
     data_dir  = Path(cfg["data_dir"])
+
+    # Rotate connections.jsonl if it exceeds 5MB
+    conn_log = data_dir / "logs" / "connections.jsonl"
+    if conn_log.exists():
+        _rotate_analytics_log(conn_log)
+
     blocklist = read_blocklist(data_dir)
     analytics = read_analytics(data_dir, days=cfg["analytics_days"])
     log("INFO", f"Collected {len(blocklist.splitlines())} blocklist lines, {len(analytics)} analytics events")
