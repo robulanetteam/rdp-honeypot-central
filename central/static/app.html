@@ -265,6 +265,7 @@
         <button onclick="setReportTab('ips')"      id="rtab-ips"      class="filter-btn">IP Analytics</button>
         <button onclick="setReportTab('local')"    id="rtab-local"    class="filter-btn">🏠 Local</button>
         <button onclick="setReportTab('conn')"     id="rtab-conn"     class="filter-btn">Connections</button>
+        <button onclick="setReportTab('expiry')"   id="rtab-expiry"   class="filter-btn">⏱ Expiry</button>
       </div>
       <div id="rpane-overview">
         <div id="reports-global" class="text-gray-400 text-sm">Загрузка…</div>
@@ -295,6 +296,17 @@
         <div class="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
           <div id="conn-table" class="overflow-y-auto overflow-x-auto text-xs" style="max-height:70vh">
             <p class="text-gray-600 p-3">Загрузка…</p>
+          </div>
+        </div>
+      </div>
+      <div id="rpane-expiry" class="hidden">
+        <div class="flex items-center gap-3 mb-3 flex-wrap">
+          <button onclick="loadExpiryReport()" class="text-xs text-gray-500 hover:text-gray-300">↺ Refresh</button>
+          <span id="expiry-summary" class="ml-auto text-xs text-gray-400"></span>
+        </div>
+        <div class="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
+          <div id="expiry-table" class="overflow-y-auto overflow-x-auto text-xs" style="max-height:70vh">
+            <p class="text-gray-600 p-3">Нажмите Refresh для загрузки</p>
           </div>
         </div>
       </div>
@@ -1619,13 +1631,14 @@ let _allIps = [];
 
 function setReportTab(name) {
   _currentRTab = name;
-  ['overview', 'nodes', 'ips', 'conn', 'local'].forEach(t => {
+  ['overview', 'nodes', 'ips', 'conn', 'local', 'expiry'].forEach(t => {
     document.getElementById('rpane-' + t)?.classList.add('hidden');
     document.getElementById('rtab-'  + t)?.classList.remove('active');
   });
   document.getElementById('rpane-' + name)?.classList.remove('hidden');
   document.getElementById('rtab-'  + name)?.classList.add('active');
-  if (name === 'conn') loadConnections();
+  if (name === 'conn')   loadConnections();
+  if (name === 'expiry') loadExpiryReport();
   if (name === 'ips'   && _reportData) renderIpTable(_reportData.top_ips);
   if (name === 'local' && _reportData) renderLocalPane(_reportData.local_intruders);
 }
@@ -1881,6 +1894,41 @@ function _renderConnTable() {
 }
 
 // ── Telegram settings ─────────────────────────────────────────────────────────
+
+async function loadExpiryReport() {
+  const el = document.getElementById('expiry-table');
+  const sumEl = document.getElementById('expiry-summary');
+  el.innerHTML = '<p class="text-gray-600 p-3">Загрузка…</p>';
+  const data = await api('GET', '/api/blocklist/expiry').catch(e => { el.innerHTML = '<p class="text-red-500 p-3">' + e.message + '</p>'; return null; });
+  if (!data) return;
+  const { entries, next_expiry, total } = data;
+  if (!entries.length) {
+    el.innerHTML = '<p class="text-gray-600 p-3">Нет данных о сроках блокировки</p>';
+    sumEl.textContent = '';
+    return;
+  }
+  sumEl.textContent = 'Ближайшая разблокировка: ' + (next_expiry || '—') + '  |  Всего IP: ' + total;
+  const now = Date.now() / 1000;
+  const rows = entries.map(e => {
+    const expiredCls = e.expired ? 'text-red-400' : '';
+    const remStr = e.expired ? '<span class="text-red-400">истёк</span>'
+                             : (e.remaining_days < 7 ? '<span class="text-yellow-400">' + e.remaining_days + 'd</span>'
+                                                      : '<span class="text-gray-300">' + e.remaining_days + 'd</span>');
+    return '<tr class="hover:bg-gray-800/60">'
+      + '<td class="px-3 py-1 font-mono ' + expiredCls + ' whitespace-nowrap">' + esc(e.ip) + '</td>'
+      + '<td class="px-3 py-1 text-gray-300 whitespace-nowrap">' + esc(e.block_until_fmt) + '</td>'
+      + '<td class="px-3 py-1 text-right whitespace-nowrap">' + remStr + '</td>'
+      + '</tr>';
+  }).join('');
+  el.innerHTML = '<table class="w-full border-collapse">'
+    + '<thead><tr class="border-b border-gray-700 text-gray-400">'
+    + '<th class="px-3 py-2 text-left font-medium">IP-адрес</th>'
+    + '<th class="px-3 py-2 text-left font-medium">Заблокирован до</th>'
+    + '<th class="px-3 py-2 text-right font-medium">Осталось</th>'
+    + '</tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+
 
 async function loadTelegramSettings() {
   const s = await api('GET', '/api/settings/telegram').catch(() => null);

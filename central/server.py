@@ -1223,13 +1223,21 @@ def _do_deploy_internal(triggered_by: Optional[str] = None) -> dict:
     _new_with_info = []
     for _ip in _new_ips:
         _inf = _ip_info.get(_ip, {})
+        _bu  = meta.get(_ip)  # block_until ISO string or None
+        _bu_short = ""
+        if _bu:
+            try:
+                _bu_short = datetime.fromisoformat(_bu).strftime("%d.%m.%Y")
+            except Exception:
+                _bu_short = _bu[:10]
         _new_with_info.append((_ip, _inf.get("scope", 0), _inf.get("country", "??"),
-                               _inf.get("asn", ""), _inf.get("cls", "unknown")))
+                               _inf.get("asn", ""), _inf.get("cls", "unknown"), _bu_short))
     _new_with_info.sort(key=lambda x: -x[1])
     _ip_lines = []
-    for _ip, _scope, _country, _asn, _cls in _new_with_info[:20]:
+    for _ip, _scope, _country, _asn, _cls, _bu_short in _new_with_info[:20]:
         _asn_short = _asn.split(" ")[0] if _asn else "—"
-        _ip_lines.append(f"  <code>{_ip}</code>  {_country}  {_asn_short}  <i>{_cls}</i>  [{_scope}d]")
+        _until_str = f"  до {_bu_short}" if _bu_short else ""
+        _ip_lines.append(f"  <code>{_ip}</code>  {_country}  {_asn_short}  <i>{_cls}</i>  [{_scope}d]{_until_str}")
     _new_block = ""
     if _ip_lines:
         _more = len(_new_ips) - 20 if len(_new_ips) > 20 else 0
@@ -1278,18 +1286,19 @@ def _do_prune_internal() -> dict:
             all_ips.append(ip)
 
     active: list[str] = []
-    pruned_count = 0
+    pruned_ips: list[tuple] = []  # (ip, block_until_iso)
     for ip in all_ips:
         block_until = meta.get(ip)
         if block_until:
             try:
                 if datetime.fromisoformat(block_until).timestamp() <= now_ts:
-                    pruned_count += 1
+                    pruned_ips.append((ip, block_until))
                     continue
             except (ValueError, TypeError):
                 pass
         active.append(ip)
 
+    pruned_count = len(pruned_ips)
     if pruned_count == 0:
         return {"pruned": 0, "remaining": len(active), "message": "No expired IPs found"}
 
@@ -1315,18 +1324,37 @@ def _do_prune_internal() -> dict:
     (DEPLOY_PATH / "blocklist_mikrotik.rsc").write_text("\n".join(mt_lines))
 
     # Clean meta: remove pruned IPs
-    for ip in all_ips:
-        if ip not in active and ip in meta:
+    for ip, _ in pruned_ips:
+        if ip in meta:
             del meta[ip]
     _save_block_meta(meta)
 
     write_log(None, "INFO", "prune_expired",
               f"pruned={pruned_count} remaining={len(active)}")
 
+    # Telegram: notify about removed IPs
+    _prune_lines = []
+    for _ip, _bu in pruned_ips[:25]:
+        try:
+            _bu_fmt = datetime.fromisoformat(_bu).strftime("%d.%m.%Y")
+        except Exception:
+            _bu_fmt = str(_bu)[:10]
+        _prune_lines.append(f"  <code>{_ip}</code>  (до {_bu_fmt})")
+    _prune_block = "\n".join(_prune_lines)
+    _more_pruned = pruned_count - 25 if pruned_count > 25 else 0
+    if _more_pruned:
+        _prune_block += f"\n  <i>...и ещё {_more_pruned}</i>"
+    notify_telegram(
+        f"\U0001f513 <b>Prune: разблокировано {pruned_count} IP</b>\n"
+        f"\U0001f512 Остаётся в блоклисте: {len(active)}\n"
+        + _prune_block
+    )
+
     return {
-        "pruned":    pruned_count,
-        "remaining": len(active),
-        "message":   f"Removed {pruned_count} expired IP(s), {len(active)} remain",
+        "pruned":      pruned_count,
+        "pruned_ips":  [ip for ip, _ in pruned_ips],
+        "remaining":   len(active),
+        "message":     f"Removed {pruned_count} expired IP(s), {len(active)} remain",
     }
 
 
@@ -1337,7 +1365,38 @@ async def api_deploy_prune(request: Request):
     return _do_prune_internal()
 
 
-@app.get("/api/deployments")
+@app.get("/api/blocklist/expiry")
+async def api_blocklist_expiry(request: Request):
+    """Return blocklist IPs with their block_until dates, sorted soonest-first."""
+    require_admin(request)
+    meta = _load_block_meta()
+    if not meta:
+        return {"entries": [], "next_expiry": None}
+    now_ts = time.time()
+    entries = []
+    for ip, bu in meta.items():
+        try:
+            bu_ts = datetime.fromisoformat(bu).timestamp()
+        except Exception:
+            continue
+        remaining_days = max(0, round((bu_ts - now_ts) / 86400, 1))
+        entries.append({
+            "ip":             ip,
+            "block_until":    bu,
+            "block_until_fmt": datetime.fromisoformat(bu).strftime("%d.%m.%Y"),
+            "remaining_days": remaining_days,
+            "expired":        bu_ts <= now_ts,
+        })
+    entries.sort(key=lambda x: x["block_until"])
+    next_expiry = None
+    for e in entries:
+        if not e["expired"]:
+            next_expiry = e["block_until_fmt"]
+            break
+    return {"entries": entries, "next_expiry": next_expiry, "total": len(entries)}
+
+
+
 async def api_deployments(request: Request):
     require_admin(request)
     with get_db() as c:
