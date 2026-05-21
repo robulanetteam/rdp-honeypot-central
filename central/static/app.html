@@ -354,6 +354,20 @@
         </div>
 
         <div class="bg-gray-800 rounded-xl border border-gray-700 p-5">
+          <h2 class="font-bold text-orange-400 mb-3">Change Admin Token</h2>
+          <p class="text-xs text-gray-500 mb-3">Новый токен сохраняется в DB и перезаписывает переменную среды. Мин. 12 символов.</p>
+          <div class="space-y-2">
+            <input id="new-admin-token" type="password" placeholder="Новый admin token…" autocomplete="new-password"
+              class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500">
+            <button onclick="changeAdminToken()"
+              class="w-full bg-orange-700 hover:bg-orange-600 text-white rounded px-3 py-1.5 text-sm font-bold transition-colors">
+              Apply New Token
+            </button>
+            <p id="admin-token-msg" class="text-xs hidden"></p>
+          </div>
+        </div>
+
+        <div class="bg-gray-800 rounded-xl border border-gray-700 p-5">
           <h2 class="font-bold text-orange-400 mb-3">Telegram Notifications</h2>
           <p class="text-xs text-gray-500 mb-3">Уведомления при авто-approve и deploy: кол-во IP, страны, bruteforcers, scanners.</p>
           <div class="space-y-2">
@@ -382,6 +396,32 @@
 
   </main>
 </div><!-- /#app -->
+
+<!-- ── Node Edit Modal ──────────────────────────────────────────────────────── -->
+<div id="node-edit-modal" class="hidden fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4" onclick="if(event.target===this)closeNodeEditModal()">
+  <div class="bg-gray-800 border border-gray-600 rounded-2xl p-6 w-full max-w-md shadow-2xl">
+    <div class="flex justify-between items-center mb-4">
+      <h3 class="text-orange-400 font-bold text-base">Edit Node</h3>
+      <button onclick="closeNodeEditModal()" class="text-gray-500 hover:text-gray-300 text-xl leading-none">&times;</button>
+    </div>
+    <input type="hidden" id="edit-node-orig-id">
+    <div class="space-y-3">
+      <div>
+        <label class="block text-xs text-gray-500 mb-1">Node ID</label>
+        <input id="edit-node-id" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500">
+      </div>
+      <div>
+        <label class="block text-xs text-gray-500 mb-1">Label</label>
+        <input id="edit-node-label" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500">
+      </div>
+    </div>
+    <div class="flex gap-2 mt-5">
+      <button onclick="saveNodeEdit()" class="flex-1 bg-orange-600 hover:bg-orange-500 text-white rounded px-4 py-2 text-sm font-bold transition-colors">Save</button>
+      <button onclick="closeNodeEditModal()" class="bg-gray-700 hover:bg-gray-600 text-gray-300 rounded px-4 py-2 text-sm transition-colors">Cancel</button>
+    </div>
+    <p id="edit-node-err" class="text-red-400 text-xs mt-2 hidden"></p>
+  </div>
+</div>
 
 <script>
 'use strict';
@@ -1395,17 +1435,30 @@ async function loadSettingsNodes() {
   loadAgentDistInfo();
   const nodes = await api('GET', '/api/nodes').catch(() => []);
   const el = document.getElementById('settings-nodes-list');
-  el.innerHTML = nodes.length
-    ? nodes.map(n => `
-        <div class="flex justify-between items-center py-2">
-          <div>
-            <span class="text-white font-bold">${esc(n.label)}</span>
-            <span class="text-gray-500 text-xs ml-2">${esc(n.id)}</span>
-          </div>
-          <button onclick="delNode('${esc(n.id)}')"
-            class="text-red-600 hover:text-red-400 text-xs transition-colors">Delete</button>
-        </div>`).join('')
-    : '<p class="text-gray-500 text-xs">No nodes registered yet.</p>';
+  if (!nodes.length) {
+    el.innerHTML = '<p class="text-gray-500 text-xs">No nodes registered yet.</p>';
+    return;
+  }
+  el.innerHTML = nodes.map(n => {
+    const nid = esc(n.id);
+    return '<div class="py-2.5 border-b border-gray-700/60 last:border-0">'
+      + '<div class="flex justify-between items-start gap-2">'
+      + '<div class="min-w-0">'
+      + '<span class="text-white font-bold">' + esc(n.label) + '</span>'
+      + '<span class="text-gray-500 text-xs ml-2 font-mono">' + nid + '</span>'
+      + '</div>'
+      + '<div class="flex gap-2 shrink-0">'
+      + '<button onclick="openNodeEditModal(\'' + nid + '\',\'' + esc(n.label) + '\')" class="text-xs text-blue-400 hover:text-blue-300 transition-colors">\u270f Edit</button>'
+      + '<button onclick="delNode(\'' + nid + '\')" class="text-xs text-red-600 hover:text-red-400 transition-colors">Delete</button>'
+      + '</div>'
+      + '</div>'
+      + '<div id="token-row-' + nid + '" class="mt-1.5 flex items-center gap-2 flex-wrap">'
+      + '<button onclick="showNodeToken(\'' + nid + '\')" class="text-xs text-gray-500 hover:text-gray-300 transition-colors">\ud83d\udd11 Show token</button>'
+      + '<button onclick="regenNodeToken(\'' + nid + '\')" class="text-xs text-yellow-700 hover:text-yellow-500 transition-colors">\u21bb Regen token</button>'
+      + '</div>'
+      + '<div id="token-display-' + nid + '" class="hidden mt-1 bg-black/40 rounded px-2 py-1 text-yellow-300 text-xs font-mono break-all select-all"></div>'
+      + '</div>';
+  }).join('');
 }
 
 async function addNode() {
@@ -1456,6 +1509,83 @@ async function saveNodeAuto(nodeId) {
     if (msg) { msg.classList.remove('hidden'); setTimeout(() => msg.classList.add('hidden'), 2000); }
     loadNodes();
   } catch(e) { alert('Error: ' + e.message); }
+}
+
+// ── Node edit modal ───────────────────────────────────────────────────────────
+
+function openNodeEditModal(nodeId, label) {
+  document.getElementById('edit-node-orig-id').value = nodeId;
+  document.getElementById('edit-node-id').value      = nodeId;
+  document.getElementById('edit-node-label').value   = label;
+  document.getElementById('edit-node-err').classList.add('hidden');
+  document.getElementById('node-edit-modal').classList.remove('hidden');
+}
+
+function closeNodeEditModal() {
+  document.getElementById('node-edit-modal').classList.add('hidden');
+}
+
+async function saveNodeEdit() {
+  const origId   = document.getElementById('edit-node-orig-id').value;
+  const newId    = document.getElementById('edit-node-id').value.trim();
+  const newLabel = document.getElementById('edit-node-label').value.trim();
+  const errEl    = document.getElementById('edit-node-err');
+  errEl.classList.add('hidden');
+  if (!newId || !newLabel) { errEl.textContent = 'Both fields are required'; errEl.classList.remove('hidden'); return; }
+  try {
+    await api('PUT', '/api/nodes/' + encodeURIComponent(origId), { node_id: newId, label: newLabel });
+    closeNodeEditModal();
+    loadSettingsNodes();
+    loadNodes();
+  } catch(e) { errEl.textContent = e.message; errEl.classList.remove('hidden'); }
+}
+
+// ── Node token show/regen ────────────────────────────────────────────────────
+
+async function showNodeToken(nodeId) {
+  try {
+    const r = await api('GET', '/api/nodes/' + encodeURIComponent(nodeId) + '/token');
+    const dispEl = document.getElementById('token-display-' + nodeId);
+    if (dispEl) {
+      dispEl.textContent = r.token;
+      dispEl.classList.toggle('hidden');
+    }
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function regenNodeToken(nodeId) {
+  if (!confirm('Regenerate token for node "' + nodeId + '"?\nThe current token will stop working immediately.')) return;
+  try {
+    const r = await api('POST', '/api/nodes/' + encodeURIComponent(nodeId) + '/token/regen');
+    const dispEl = document.getElementById('token-display-' + nodeId);
+    if (dispEl) {
+      dispEl.textContent = r.token;
+      dispEl.classList.remove('hidden');
+    }
+    alert('New token generated. Update CENTRAL_TOKEN on the node.');
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+// ── Change admin token ────────────────────────────────────────────────────────
+
+async function changeAdminToken() {
+  const newTok = document.getElementById('new-admin-token').value.trim();
+  const msgEl  = document.getElementById('admin-token-msg');
+  msgEl.classList.add('hidden');
+  if (newTok.length < 12) { msgEl.textContent = '\u274c \u041c\u0438\u043d. 12 \u0441\u0438\u043c\u0432\u043e\u043b\u043e\u0432'; msgEl.classList.remove('hidden'); return; }
+  try {
+    await api('POST', '/api/auth/change-token', { new_token: newTok });
+    ADMIN_TOKEN = newTok;
+    localStorage.setItem('admin_token', newTok);
+    document.getElementById('new-admin-token').value = '';
+    msgEl.textContent = '\u2713 \u0422\u043e\u043a\u0435\u043d \u0438\u0437\u043c\u0435\u043d\u0451\u043d. \u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u0435 \u0435\u0433\u043e \u0432 \u043d\u0430\u0434\u0451\u0436\u043d\u043e\u043c \u043c\u0435\u0441\u0442\u0435.';
+    msgEl.className = 'text-xs text-green-400';
+    msgEl.classList.remove('hidden');
+  } catch(e) {
+    msgEl.textContent = '\u274c ' + e.message;
+    msgEl.className = 'text-xs text-red-400';
+    msgEl.classList.remove('hidden');
+  }
 }
 
 // ── Utils ─────────────────────────────────────────────────────────────────────

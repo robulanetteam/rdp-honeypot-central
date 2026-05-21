@@ -47,6 +47,21 @@ ADMIN_TOKEN        = os.environ.get("ADMIN_TOKEN",             "change-me")
 ONLINE_SECS        = int(os.environ.get("ONLINE_SECS",         "900"))
 MIKROTIK_LIST_NAME = os.environ.get("MIKROTIK_LIST_NAME",      "honeypot-block")
 
+# Effective admin token: may be overridden from DB
+_effective_admin_token: str = ADMIN_TOKEN
+
+
+def _load_admin_token_from_db() -> None:
+    """On startup: if admin_token is stored in settings DB, use it instead of env var."""
+    global _effective_admin_token
+    try:
+        with get_db() as c:
+            row = c.execute("SELECT value FROM settings WHERE key='admin_token'").fetchone()
+        if row and row["value"]:
+            _effective_admin_token = row["value"]
+    except Exception:
+        pass
+
 # ── Database ───────────────────────────────────────────────────────────────────
 
 @contextmanager
@@ -152,6 +167,7 @@ for _mig in [
         pass  # column already exists
 
 DEPLOY_PATH.mkdir(parents=True, exist_ok=True)
+_load_admin_token_from_db()
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
@@ -178,7 +194,7 @@ def _client_ip(request: Request) -> str:
 def require_admin(request: Request):
     tok = (request.headers.get("x-admin-token") or
            request.cookies.get("admin_token", ""))
-    if tok != ADMIN_TOKEN:
+    if not secrets.compare_digest(tok, _effective_admin_token):
         raise HTTPException(401, "Unauthorized")
 
 
@@ -329,7 +345,7 @@ async def api_login(request: Request):
     body = await request.json()
     tok  = str(body.get("token", ""))
 
-    if not secrets.compare_digest(tok, ADMIN_TOKEN):
+    if not secrets.compare_digest(tok, _effective_admin_token):
         _fail_times[ip].append(now)
         remaining = max(0, RATE_MAX_FAIL - len(_fail_times[ip]))
         write_log(None, "WARN", "login_failed", f"ip={ip} attempts_left={remaining}")
@@ -351,6 +367,22 @@ async def api_auth_clear_fails(request: Request):
     _fail_times.clear()
     write_log(None, "INFO", "login_fails_cleared", f"by={_client_ip(request)} count={cleared}")
     return {"cleared": cleared}
+
+
+@app.post("/api/auth/change-token")
+async def api_auth_change_token(request: Request):
+    """Change the admin token (stored in DB, survives restarts)."""
+    global _effective_admin_token
+    require_admin(request)
+    body = await request.json()
+    new_token = str(body.get("new_token", "")).strip()
+    if len(new_token) < 12:
+        raise HTTPException(400, "Token must be at least 12 characters")
+    with get_db() as c:
+        c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('admin_token', ?)", (new_token,))
+    _effective_admin_token = new_token
+    write_log(None, "INFO", "admin_token_changed", f"by={_client_ip(request)}")
+    return {"ok": True}
 
 
 @app.get("/api/auth/status")
@@ -658,6 +690,61 @@ async def api_del_node(node_id: str, request: Request):
         c.execute("DELETE FROM nodes WHERE id=?", (node_id,))
     write_log(node_id, "INFO", "node_deleted", "")
     return {"deleted": node_id}
+
+
+@app.put("/api/nodes/{node_id}")
+async def api_rename_node(node_id: str, request: Request):
+    """Rename node_id and/or label. Updates all related rows in a transaction."""
+    require_admin(request)
+    body = await request.json()
+    new_id    = str(body.get("node_id", "")).strip()
+    new_label = str(body.get("label",   "")).strip()
+    if not new_id or not new_label:
+        raise HTTPException(400, "node_id and label are required")
+    with get_db() as c:
+        row = c.execute("SELECT id FROM nodes WHERE id=?", (node_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Node not found")
+        if new_id != node_id:
+            existing = c.execute("SELECT id FROM nodes WHERE id=?", (new_id,)).fetchone()
+            if existing:
+                raise HTTPException(409, f"Node ID '{new_id}' already exists")
+            # Rename with FK temporarily disabled so cascade isn't needed
+            c.execute("PRAGMA foreign_keys=OFF")
+            c.execute("UPDATE nodes       SET id=?, label=? WHERE id=?", (new_id, new_label, node_id))
+            c.execute("UPDATE submissions SET node_id=?    WHERE node_id=?", (new_id, node_id))
+            c.execute("UPDATE logs        SET node_id=?    WHERE node_id=?", (new_id, node_id))
+            c.execute("PRAGMA foreign_keys=ON")
+        else:
+            c.execute("UPDATE nodes SET label=? WHERE id=?", (new_label, node_id))
+    write_log(new_id, "INFO", "node_renamed", f"old_id={node_id} label={new_label}")
+    return {"node_id": new_id, "label": new_label}
+
+
+@app.get("/api/nodes/{node_id}/token")
+async def api_node_get_token(node_id: str, request: Request):
+    """Return the node's CENTRAL_TOKEN (admin only)."""
+    require_admin(request)
+    with get_db() as c:
+        row = c.execute("SELECT token FROM nodes WHERE id=?", (node_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Node not found")
+    return {"node_id": node_id, "token": row["token"]}
+
+
+@app.post("/api/nodes/{node_id}/token/regen")
+async def api_node_regen_token(node_id: str, request: Request):
+    """Generate a new token for the node. The old token stops working immediately."""
+    require_admin(request)
+    new_token = secrets.token_hex(32)
+    with get_db() as c:
+        rows_affected = c.execute(
+            "UPDATE nodes SET token=? WHERE id=?", (new_token, node_id)
+        ).rowcount
+    if not rows_affected:
+        raise HTTPException(404, "Node not found")
+    write_log(node_id, "INFO", "node_token_regen", f"by_admin=true")
+    return {"node_id": node_id, "token": new_token}
 
 
 @app.patch("/api/nodes/{node_id}")
