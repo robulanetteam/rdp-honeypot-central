@@ -1955,6 +1955,7 @@ function _renderExpiryTable() {
   const H = col => _expiryHeaderBtn(col, {
     ip: 'IP-адрес', block_until: 'Заблокирован до', remaining_days: 'Осталось',
     node_label: 'Нода', scope: 'Score (0-100)', cls: 'Тип',
+  }[col]);
   const rows = list.map(e => {
     const expCls = e.expired ? 'text-red-400' : '';
     const remStr = e.expired
