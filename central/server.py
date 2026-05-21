@@ -960,6 +960,21 @@ async def api_greylist_to_whitelist(ip: str, entry: GreylistWLRequest, request: 
     return {"whitelisted": ip}
 
 
+@app.get("/api/greylist/sync")
+async def api_greylist_sync(
+    request: Request,
+    x_node_token: str = Header(...),
+):
+    """Node-accessible endpoint: returns current greylist IPs for local score boosting.
+    Authenticated by node token (same as /api/submit). Excludes whitelisted IPs."""
+    node_from_token(x_node_token)  # validates token — raises 403 if invalid
+    with get_db() as c:
+        rows = c.execute("SELECT ip FROM greylist ORDER BY added_at DESC").fetchall()
+        wl = {r["ip"] for r in c.execute("SELECT ip FROM whitelist").fetchall()}
+    ips = [r["ip"] for r in rows if r["ip"] not in wl]
+    return {"ips": ips, "count": len(ips), "synced_at": time.time()}
+
+
 # ── Submissions ────────────────────────────────────────────────────────────────
 
 @app.get("/api/submissions")
