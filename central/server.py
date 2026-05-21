@@ -1256,7 +1256,7 @@ async def api_reports(request: Request):
     with get_db() as c:
         nodes = c.execute("SELECT id, label FROM nodes").fetchall()
         subs  = c.execute("""
-            SELECT node_id, status, score, analytics, bl_size, submitted_at
+            SELECT node_id, status, score, analytics, submitted_at
             FROM submissions
         """).fetchall()
         deps  = c.execute("SELECT sub_ids, ip_count, created_at FROM deployments ORDER BY created_at DESC").fetchall()
@@ -1269,9 +1269,6 @@ async def api_reports(request: Request):
     # Count deployments per node
     for d in deps:
         sub_ids = json.loads(d["sub_ids"] or "[]")
-        for row in subs:
-            if row["id"] if hasattr(row, "keys") else None:
-                pass
         # approximate: find which nodes had subs deployed
         with get_db() as c2:
             for sid in sub_ids:
