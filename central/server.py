@@ -342,6 +342,16 @@ async def api_login(request: Request):
     return {"ok": True}
 
 
+@app.post("/api/auth/clear-fails")
+async def api_auth_clear_fails(request: Request):
+    """Clear all in-memory failed login attempts (unblock all IPs)."""
+    require_admin(request)
+    cleared = len(_fail_times)
+    _fail_times.clear()
+    write_log(None, "INFO", "login_fails_cleared", f"by={_client_ip(request)} count={cleared}")
+    return {"cleared": cleared}
+
+
 @app.get("/api/auth/status")
 async def api_auth_status(request: Request):
     require_admin(request)
