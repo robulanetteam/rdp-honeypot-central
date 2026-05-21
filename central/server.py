@@ -29,7 +29,7 @@ import urllib.request
 import urllib.parse
 from collections import Counter, defaultdict
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -126,6 +126,12 @@ def init_db():
             ip       TEXT PRIMARY KEY,
             note     TEXT DEFAULT '',
             added_at REAL DEFAULT (unixepoch())
+        );
+
+        CREATE TABLE IF NOT EXISTS greylist (
+            ip       TEXT PRIMARY KEY,
+            added_at REAL DEFAULT (unixepoch()),
+            reason   TEXT DEFAULT 'auto_unblock'
         );
 
         CREATE TABLE IF NOT EXISTS logs (
@@ -918,6 +924,42 @@ async def api_del_whitelist(ip: str, request: Request):
     return {"removed": ip}
 
 
+# ── Greylist ───────────────────────────────────────────────────────────────────
+
+class GreylistWLRequest(BaseModel):
+    note: str = ""
+
+
+@app.get("/api/greylist")
+async def api_get_greylist(request: Request):
+    """List all greylist entries with whitelisted flag."""
+    require_admin(request)
+    with get_db() as c:
+        rows = c.execute("SELECT ip, added_at, reason FROM greylist ORDER BY added_at DESC").fetchall()
+        wl = {r["ip"] for r in c.execute("SELECT ip FROM whitelist").fetchall()}
+    return [{"ip": r["ip"], "added_at": r["added_at"], "reason": r["reason"],
+             "whitelisted": r["ip"] in wl} for r in rows]
+
+
+@app.delete("/api/greylist/{ip:path}")
+async def api_del_greylist(ip: str, request: Request):
+    """Remove IP from greylist."""
+    require_admin(request)
+    with get_db() as c:
+        c.execute("DELETE FROM greylist WHERE ip=?", (ip,))
+    return {"removed": ip}
+
+
+@app.post("/api/greylist/{ip:path}/whitelist")
+async def api_greylist_to_whitelist(ip: str, entry: GreylistWLRequest, request: Request):
+    """Move IP from greylist to whitelist."""
+    require_admin(request)
+    with get_db() as c:
+        c.execute("INSERT OR REPLACE INTO whitelist (ip, note) VALUES (?,?)", (ip, entry.note[:200]))
+        c.execute("DELETE FROM greylist WHERE ip=?", (ip,))
+    return {"whitelisted": ip}
+
+
 # ── Submissions ────────────────────────────────────────────────────────────────
 
 @app.get("/api/submissions")
@@ -1121,11 +1163,13 @@ def _get_bu(val) -> Optional[str]:
     return val.get("until")
 
 
-def _meta_from_analytics(rows) -> dict:
+def _meta_from_analytics(rows, greylist: set = None) -> dict:
     """Build {ip: meta_entry} from analytics columns of submission rows.
     meta_entry = {"until": ISO, "at": ISO, "score": int, "days": int}
     Keeps the entry with the LONGEST block_until per IP.
+    Greylisted IPs get +30 score boost (capped at 100), extending block duration.
     """
+    greylist = greylist or set()
     meta: dict = {}
     now_iso = datetime.now(tz=timezone.utc).isoformat()
     for row in rows:
@@ -1140,6 +1184,14 @@ def _meta_from_analytics(rows) -> dict:
             bu = entry.get("block_until")
             if ip and bu:
                 score = int(entry.get("scope") or 0)
+                if ip in greylist:
+                    score = min(100, score + 30)
+                    # Recompute block_until based on boosted score
+                    days = _scope_to_days(score)
+                    if days > 0:
+                        boosted_bu = (datetime.now(tz=timezone.utc) + timedelta(days=days)).isoformat()
+                        if boosted_bu > bu:
+                            bu = boosted_bu
                 days  = _scope_to_days(score)
                 if ip not in meta or bu > _get_bu(meta[ip]):
                     meta[ip] = {"until": bu, "at": now_iso, "score": score, "days": days}
@@ -1178,6 +1230,7 @@ def _do_deploy_internal(triggered_by: Optional[str] = None) -> dict:
 
     with get_db() as c:
         wl = {r["ip"] for r in c.execute("SELECT ip FROM whitelist").fetchall()}
+        gl = {r["ip"] for r in c.execute("SELECT ip FROM greylist").fetchall()}
 
     ips: dict[str, str] = {}
     now_ts = time.time()
@@ -1186,7 +1239,8 @@ def _do_deploy_internal(triggered_by: Optional[str] = None) -> dict:
     meta = _load_block_meta()
 
     # Update meta from new submission analytics — keep longest block_until per IP
-    new_meta = _meta_from_analytics(rows)
+    # Greylisted IPs get +30 score boost
+    new_meta = _meta_from_analytics(rows, gl)
     _meta_merge(meta, new_meta)
 
     # Seed with currently deployed IPs — skip expired ones
@@ -1417,6 +1471,15 @@ def _do_prune_internal() -> dict:
             del meta[ip]
     _save_block_meta(meta)
 
+    # Add pruned IPs to greylist (unless already in whitelist)
+    with get_db() as c:
+        for ip, _ in pruned_ips:
+            if ip not in wl:
+                c.execute(
+                    "INSERT OR REPLACE INTO greylist (ip, added_at, reason) VALUES (?, unixepoch(), 'auto_unblock')",
+                    (ip,),
+                )
+
     write_log(None, "INFO", "prune_expired",
               f"pruned={pruned_count} remaining={len(active)}")
 
@@ -1435,6 +1498,7 @@ def _do_prune_internal() -> dict:
     notify_telegram(
         f"\U0001f513 <b>Prune: разблокировано {pruned_count} IP</b>\n"
         f"\U0001f512 Остаётся в блоклисте: {len(active)}\n"
+        f"\U0001f7e0 Добавлено в greylist: {pruned_count}\n"
         + _prune_block
     )
 

@@ -266,6 +266,7 @@
         <button onclick="setReportTab('local')"    id="rtab-local"    class="filter-btn">🏠 Local</button>
         <button onclick="setReportTab('conn')"     id="rtab-conn"     class="filter-btn">Connections</button>
         <button onclick="setReportTab('expiry')"   id="rtab-expiry"   class="filter-btn">⏱ Expiry</button>
+        <button onclick="setReportTab('greylist')" id="rtab-greylist" class="filter-btn">🟠 Greylist</button>
       </div>
       <div id="rpane-overview">
         <div id="reports-global" class="text-gray-400 text-sm">Загрузка…</div>
@@ -308,6 +309,19 @@
         </div>
         <div class="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
           <div id="expiry-table" class="overflow-y-auto overflow-x-auto text-xs" style="max-height:70vh">
+            <p class="text-gray-600 p-3">Нажмите Refresh для загрузки</p>
+          </div>
+        </div>
+      </div>
+      <div id="rpane-greylist" class="hidden">
+        <div class="flex items-center gap-3 mb-3 flex-wrap">
+          <input id="greylist-search" oninput="_filterGreylist()" placeholder="Поиск по IP / причине…"
+            class="bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-orange-500 w-full sm:w-64">
+          <button onclick="loadGreylistReport()" class="text-xs text-gray-500 hover:text-gray-300">↺ Refresh</button>
+          <span id="greylist-summary" class="ml-auto text-xs text-gray-400"></span>
+        </div>
+        <div class="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
+          <div id="greylist-table" class="overflow-y-auto overflow-x-auto text-xs" style="max-height:70vh">
             <p class="text-gray-600 p-3">Нажмите Refresh для загрузки</p>
           </div>
         </div>
@@ -1633,14 +1647,15 @@ let _allIps = [];
 
 function setReportTab(name) {
   _currentRTab = name;
-  ['overview', 'nodes', 'ips', 'conn', 'local', 'expiry'].forEach(t => {
+  ['overview', 'nodes', 'ips', 'conn', 'local', 'expiry', 'greylist'].forEach(t => {
     document.getElementById('rpane-' + t)?.classList.add('hidden');
     document.getElementById('rtab-'  + t)?.classList.remove('active');
   });
   document.getElementById('rpane-' + name)?.classList.remove('hidden');
   document.getElementById('rtab-'  + name)?.classList.add('active');
-  if (name === 'conn')   loadConnections();
-  if (name === 'expiry') loadExpiryReport();
+  if (name === 'conn')     loadConnections();
+  if (name === 'expiry')   loadExpiryReport();
+  if (name === 'greylist') loadGreylistReport();
   if (name === 'ips'   && _reportData) renderIpTable(_reportData.top_ips);
   if (name === 'local' && _reportData) renderLocalPane(_reportData.local_intruders);
 }
@@ -2022,6 +2037,76 @@ async function expiryWhitelistIp(ip) {
 }
 
 
+
+async function greylistWhitelistIp(ip) {
+  const note = prompt('Добавить ' + ip + ' в whitelist.\nПримечание (опционально):');
+  if (note === null) return;
+  try {
+    await api('POST', '/api/greylist/' + encodeURIComponent(ip) + '/whitelist', { note });
+    loadGreylistReport();
+  } catch(e) { alert('Ошибка: ' + e.message); }
+}
+
+let _greylistData = [];
+let _greylistFilter = '';
+
+async function loadGreylistReport() {
+  document.getElementById('greylist-table').innerHTML = '<p class="text-gray-500 p-3">Загрузка…</p>';
+  const data = await api('GET', '/api/greylist').catch(e => { alert(e); return null; });
+  if (!data) return;
+  _greylistData = data;
+  _greylistFilter = (document.getElementById('greylist-search').value || '').trim().toLowerCase();
+  _renderGreylistTable();
+  document.getElementById('greylist-summary').textContent = `Всего: ${data.length}`;
+}
+
+function _filterGreylist() {
+  _greylistFilter = (document.getElementById('greylist-search').value || '').trim().toLowerCase();
+  _renderGreylistTable();
+}
+
+function _renderGreylistTable() {
+  const rows = _greylistFilter
+    ? _greylistData.filter(e => e.ip.includes(_greylistFilter) || (e.reason||'').toLowerCase().includes(_greylistFilter))
+    : _greylistData;
+  if (!rows.length) {
+    document.getElementById('greylist-table').innerHTML = '<p class="text-gray-500 p-3">Нет записей</p>';
+    return;
+  }
+  let html = '<table class="w-full text-left"><thead class="sticky top-0 bg-gray-900">'
+    + '<tr class="border-b border-gray-700">'
+    + '<th class="px-3 py-2">IP</th>'
+    + '<th class="px-3 py-2">Добавлен</th>'
+    + '<th class="px-3 py-2">Причина</th>'
+    + '<th class="px-3 py-2 text-right">Действия</th>'
+    + '</tr></thead><tbody>';
+  for (const e of rows) {
+    const ipAttr = e.ip.replace(/"/g, '&quot;');
+    const dt = e.added_at ? new Date(e.added_at * 1000).toLocaleDateString('ru-RU') : '—';
+    const reasonLabel = e.reason === 'auto_unblock' ? '🔓 Авто-разблокировка' : (e.reason || '—');
+    html += '<tr class="border-b border-gray-700/50 hover:bg-gray-700/30">'
+      + '<td class="px-3 py-1 font-mono">' + e.ip + '</td>'
+      + '<td class="px-3 py-1">' + dt + '</td>'
+      + '<td class="px-3 py-1 text-gray-400">' + reasonLabel + '</td>'
+      + '<td class="px-3 py-1 text-right whitespace-nowrap">'
+      +   '<button onclick="greylistRemoveIp(&quot;' + ipAttr + '&quot;)" class="text-xs text-red-400 hover:text-red-300 mr-2" title="Убрать из greylist">✕</button>'
+      +   (e.whitelisted
+            ? '<span class="text-xs text-green-600" title="Уже в whitelist">✓ WL</span>'
+            : '<button onclick="greylistWhitelistIp(&quot;' + ipAttr + '&quot;)" class="text-xs text-green-400 hover:text-green-300" title="Добавить в whitelist">+ WL</button>')
+      + '</td>'
+      + '</tr>';
+  }
+  html += '</tbody></table>';
+  document.getElementById('greylist-table').innerHTML = html;
+}
+
+async function greylistRemoveIp(ip) {
+  if (!confirm('Убрать ' + ip + ' из greylist?')) return;
+  try {
+    await api('DELETE', '/api/greylist/' + encodeURIComponent(ip));
+    loadGreylistReport();
+  } catch(e) { alert('Ошибка: ' + e.message); }
+}
 
 async function loadTelegramSettings() {
   const s = await api('GET', '/api/settings/telegram').catch(() => null);
