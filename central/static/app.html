@@ -1954,9 +1954,7 @@ function _renderExpiryTable() {
 
   const H = col => _expiryHeaderBtn(col, {
     ip: 'IP-адрес', block_until: 'Заблокирован до', remaining_days: 'Осталось',
-    node_label: 'Нода', scope: 'Scope', cls: 'Тип',
-  }[col]);
-
+    node_label: 'Нода', scope: 'Score (0-100)', cls: 'Тип',
   const rows = list.map(e => {
     const expCls = e.expired ? 'text-red-400' : '';
     const remStr = e.expired
@@ -1970,7 +1968,7 @@ function _renderExpiryTable() {
       + '<td class="px-3 py-1 text-gray-300 whitespace-nowrap">' + esc(e.block_until_fmt) + '</td>'
       + '<td class="px-3 py-1 text-right whitespace-nowrap">' + remStr + '</td>'
       + '<td class="px-3 py-1 text-gray-400 whitespace-nowrap">' + esc(e.node_label || '—') + '</td>'
-      + '<td class="px-3 py-1 text-right text-gray-300 whitespace-nowrap">' + (e.scope || '—') + 'd</td>'
+      + '<td class="px-3 py-1 text-right text-gray-300 whitespace-nowrap" title="Score ' + e.scope + ' → block ' + (e.scope >= 70 ? 60 : e.scope >= 50 ? 30 : e.scope >= 25 ? 7 : 0) + 'd">' + (e.scope || '—') + '</td>'
       + '<td class="px-3 py-1 whitespace-nowrap ' + (clsColor[e.cls] || 'text-gray-500') + '">' + esc(e.cls || '—') + '</td>'
       + '<td class="px-3 py-1 text-right whitespace-nowrap">'
       +   '<button onclick="expiryRemoveIp(&quot;' + ipAttr + '&quot;)" class="text-xs text-red-400 hover:text-red-300 mr-2" title="Удалить из блоклиста">✕</button>'

@@ -1292,7 +1292,9 @@ def _do_deploy_internal(triggered_by: Optional[str] = None) -> dict:
     for _ip, _scope, _country, _asn, _cls, _bu_short in _new_with_info[:20]:
         _asn_short = _asn.split(" ")[0] if _asn else "—"
         _until_str = f"  до {_bu_short}" if _bu_short else ""
-        _ip_lines.append(f"  <code>{_ip}</code>  {_country}  {_asn_short}  <i>{_cls}</i>  [{_scope}d]{_until_str}")
+        _block_days = 60 if _scope >= 70 else (30 if _scope >= 50 else (7 if _scope >= 25 else 0))
+        _score_str = f"s{_scope}" + (f"/🕒{_block_days}d" if _block_days else "")
+        _ip_lines.append(f"  <code>{_ip}</code>  {_country}  {_asn_short}  <i>{_cls}</i>  [{_score_str}]{_until_str}")
     _new_block = ""
     if _ip_lines:
         _more = len(_new_ips) - 20 if len(_new_ips) > 20 else 0
