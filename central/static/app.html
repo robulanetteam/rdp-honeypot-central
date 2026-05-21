@@ -1982,7 +1982,9 @@ function _renderExpiryTable() {
       + '<td class="px-3 py-1 whitespace-nowrap ' + (clsColor[e.cls] || 'text-gray-500') + '">' + esc(e.cls || '—') + '</td>'
       + '<td class="px-3 py-1 text-right whitespace-nowrap">'
       +   '<button onclick="expiryRemoveIp(&quot;' + ipAttr + '&quot;)" class="text-xs text-red-400 hover:text-red-300 mr-2" title="Удалить из блоклиста">✕</button>'
-      +   '<button onclick="expiryWhitelistIp(&quot;' + ipAttr + '&quot;)" class="text-xs text-green-400 hover:text-green-300" title="Добавить в whitelist">✓ WL</button>'
+      +   (e.whitelisted
+            ? '<span class="text-xs text-green-600" title="Уже в whitelist">✓ WL</span>'
+            : '<button onclick="expiryWhitelistIp(&quot;' + ipAttr + '&quot;)" class="text-xs text-green-400 hover:text-green-300" title="Добавить в whitelist">+ WL</button>')
       + '</td>'
       + '</tr>';
   }).join('');

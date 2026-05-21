@@ -1462,6 +1462,10 @@ async def api_blocklist_expiry(request: Request):
         return {"entries": [], "next_expiry": None}
     now_ts = time.time()
 
+    # Load whitelist set
+    with get_db() as c:
+        wl = {r["ip"] for r in c.execute("SELECT ip FROM whitelist").fetchall()}
+
     # Build per-IP analytics index: ip -> {node_id, node_label, scope, classification}
     _ip_an: dict = {}
     with get_db() as c:
@@ -1514,6 +1518,7 @@ async def api_blocklist_expiry(request: Request):
             "block_until_fmt": datetime.fromisoformat(bu).strftime("%d.%m.%Y"),
             "remaining_days":  remaining_days,
             "expired":         bu_ts <= now_ts,
+            "whitelisted":     ip in wl,
             # Analytics (current)
             "node_id":         an.get("node_id", ""),
             "node_label":      an.get("node_label", "—"),
