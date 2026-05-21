@@ -46,6 +46,7 @@ STATIC_PATH        = Path(os.environ.get("STATIC_PATH",        "/app/static"))
 ADMIN_TOKEN        = os.environ.get("ADMIN_TOKEN",             "change-me")
 ONLINE_SECS        = int(os.environ.get("ONLINE_SECS",         "900"))
 MIKROTIK_LIST_NAME = os.environ.get("MIKROTIK_LIST_NAME",      "honeypot-block")
+HEARTBEAT_INTERVAL = int(os.environ.get("CENTRAL_HEARTBEAT_INTERVAL", "60"))  # agent HB period seconds
 
 # Effective admin token: may be overridden from DB
 _effective_admin_token: str = ADMIN_TOKEN
@@ -169,9 +170,63 @@ for _mig in [
 DEPLOY_PATH.mkdir(parents=True, exist_ok=True)
 _load_admin_token_from_db()
 
+# ── Offline-alert state (in-memory) ──────────────────────────────────────────
+# node_id -> unix timestamp when offline alert was last sent
+_offline_alerted: dict = {}
+
+async def _check_node_heartbeats() -> None:
+    """Background task: alert via Telegram when a node misses ≥2 heartbeats."""
+    while True:
+        await asyncio.sleep(HEARTBEAT_INTERVAL)
+        try:
+            now = time.time()
+            threshold = 2 * HEARTBEAT_INTERVAL  # seconds without HB = "missed 2+"
+            with get_db() as c:
+                nodes = c.execute(
+                    "SELECT id, label, last_seen FROM nodes"
+                ).fetchall()
+            for row in nodes:
+                nid   = row["id"]
+                label = row["label"] or nid
+                ls    = row["last_seen"]
+                offline = ls is None or (now - ls) > threshold
+                if offline and nid not in _offline_alerted:
+                    # First detection → send alert
+                    ago = int(now - ls) if ls else None
+                    ago_str = f"{ago // 60} мин {ago % 60} сек" if ago else "никогда"
+                    notify_telegram(
+                        f"\u26a0\ufe0f <b>Нода недоступна: {label}</b>\n"
+                        f"ID: <code>{nid}</code>\n"
+                        f"Последний heartbeat: {ago_str} назад\n"
+                        f"(порог: {threshold}с / {threshold//60} мин)"
+                    )
+                    _offline_alerted[nid] = now
+                    write_log(nid, "WARN", "offline_alert",
+                              f"no heartbeat for {ago or 'unknown'}s")
+                elif not offline and nid in _offline_alerted:
+                    # Node recovered
+                    del _offline_alerted[nid]
+                    notify_telegram(
+                        f"\u2705 <b>Нода восстановлена: {label}</b>\n"
+                        f"ID: <code>{nid}</code>"
+                    )
+                    write_log(nid, "INFO", "online_recovery", "heartbeat resumed")
+        except Exception as _e:
+            pass  # never crash the loop
+
+
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def _lifespan(app_):
+    task = asyncio.create_task(_check_node_heartbeats())
+    yield
+    task.cancel()
+
+
 # ── App ────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Honeypot Central", docs_url=None, redoc_url=None)
+app = FastAPI(title="Honeypot Central", docs_url=None, redoc_url=None, lifespan=_lifespan)
 app.mount("/static", StaticFiles(directory=str(STATIC_PATH)), name="static")
 app.mount("/pub",    StaticFiles(directory=str(DEPLOY_PATH)), name="public")
 
