@@ -14,10 +14,14 @@ pointing to your honeypot's .env):
   CENTRAL_DATA_DIR   Path to honeypot data dir        (required)
   CENTRAL_INSECURE   Skip TLS verify (1/true)         (optional)
   CENTRAL_ANALYTICS_DAYS   How many days of analytics to send (default: 7)
+  CENTRAL_AGENT_URL  URL to fetch agent.py from on update_agent cmd
+                     Defaults to GitHub raw URL. Set to empty to use
+                     the URL provided by Central server instead.
 
 Cache:  /var/lib/honeypot-agent/last_hash  (skip re-submit if data unchanged)
 """
 
+import ast
 import hashlib
 import gzip
 import json
@@ -33,6 +37,11 @@ from pathlib import Path
 
 CACHE_PATH     = Path(os.environ.get("AGENT_CACHE", "/var/lib/honeypot-agent/last_hash"))
 HEARTBEAT_ONLY = "--heartbeat" in sys.argv
+
+GITHUB_AGENT_URL = (
+    "https://raw.githubusercontent.com/robulanetteam/rdp-honeypot-central"
+    "/main/agent/agent.py"
+)
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 
@@ -50,6 +59,7 @@ def load_config() -> dict:
         "data_dir":        os.environ.get("CENTRAL_DATA_DIR", ""),
         "insecure_ssl":    os.environ.get("CENTRAL_INSECURE", "").lower() in ("1", "true", "yes"),
         "analytics_days":  int(os.environ.get("CENTRAL_ANALYTICS_DAYS", "7")),
+        "agent_url":       os.environ.get("CENTRAL_AGENT_URL", GITHUB_AGENT_URL),
     }
     missing = [k for k, v in cfg.items()
                if k in ("server_url", "node_id", "token", "data_dir") and not v]
@@ -204,6 +214,62 @@ def post_json(url: str, token: str, body: dict, insecure: bool = False) -> dict:
         raise RuntimeError(f"Connection error: {e.reason}")
 
 
+def fetch_text(url: str, insecure: bool = False) -> str:
+    """Download a URL and return text content."""
+    req = urllib.request.Request(url, headers={"User-Agent": "honeypot-agent/1.0"})
+    ctx = make_ssl_ctx(insecure)
+    with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
+        return resp.read().decode("utf-8")
+
+
+def self_update(url: str, insecure: bool = False):
+    """Download new agent from url, validate syntax, replace self, re-exec."""
+    log("INFO", f"self_update: fetching from {url}")
+    try:
+        new_src = fetch_text(url, insecure)
+    except Exception as e:
+        log("ERROR", f"self_update: download failed: {e}")
+        return
+    # Validate Python syntax before replacing
+    try:
+        ast.parse(new_src)
+    except SyntaxError as e:
+        log("ERROR", f"self_update: syntax error in downloaded file: {e} — aborting")
+        return
+    agent_path = Path(__file__).resolve()
+    # Write atomically via temp file
+    tmp = agent_path.with_suffix(".new")
+    try:
+        tmp.write_text(new_src, encoding="utf-8")
+        tmp.chmod(agent_path.stat().st_mode)
+        tmp.replace(agent_path)
+    except Exception as e:
+        log("ERROR", f"self_update: write failed: {e}")
+        tmp.unlink(missing_ok=True)
+        return
+    log("INFO", f"self_update: replaced {agent_path} — re-executing")
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+def handle_cmd(resp: dict, cfg: dict):
+    """Process a cmd returned by the Central server in a heartbeat response."""
+    cmd = resp.get("cmd")
+    if not cmd:
+        return
+    if cmd == "restart":
+        log("INFO", "cmd=restart: re-executing agent")
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    elif cmd == "update_agent":
+        # Prefer agent_url from config (GitHub by default), fall back to server-provided URL
+        url = cfg.get("agent_url") or resp.get("agent_url", "")
+        if not url:
+            log("WARN", "update_agent: no agent_url available — skipping")
+            return
+        self_update(url, bool(cfg.get("insecure_ssl")))
+    else:
+        log("WARN", f"Unknown cmd from server: {cmd}")
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
@@ -215,8 +281,9 @@ def main():
         # Just ping the server to update last_seen without a full submission
         log("INFO", f"Sending heartbeat for node={cfg['node_id']}")
         try:
-            post_json(f"{base_url}/api/heartbeat", cfg["token"], {}, insecure)
+            hb_resp = post_json(f"{base_url}/api/heartbeat", cfg["token"], {}, insecure)
             log("INFO", "Heartbeat OK")
+            handle_cmd(hb_resp, cfg)
         except RuntimeError as e:
             log("ERROR", str(e))
             sys.exit(1)
@@ -239,8 +306,9 @@ def main():
     if current_hash == load_last_hash():
         log("INFO", "Data unchanged since last submission — sending heartbeat only")
         try:
-            post_json(f"{base_url}/api/heartbeat", cfg["token"], {}, insecure)
+            hb_resp = post_json(f"{base_url}/api/heartbeat", cfg["token"], {}, insecure)
             log("INFO", "Heartbeat OK")
+            handle_cmd(hb_resp, cfg)
         except RuntimeError as e:
             log("ERROR", str(e))
             sys.exit(1)
@@ -273,6 +341,13 @@ def main():
     else:
         log("ERROR", f"Unexpected response: {result}")
         sys.exit(1)
+
+    # Check for pending server commands (update_agent, restart)
+    try:
+        hb_resp = post_json(f"{base_url}/api/heartbeat", cfg["token"], {}, insecure)
+        handle_cmd(hb_resp, cfg)
+    except RuntimeError:
+        pass  # non-critical
 
 
 if __name__ == "__main__":
