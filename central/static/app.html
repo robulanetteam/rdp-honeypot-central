@@ -263,6 +263,7 @@
         <button onclick="setReportTab('overview')" id="rtab-overview" class="filter-btn active">Overview</button>
         <button onclick="setReportTab('nodes')"    id="rtab-nodes"    class="filter-btn">Honeypots</button>
         <button onclick="setReportTab('ips')"      id="rtab-ips"      class="filter-btn">IP Analytics</button>
+        <button onclick="setReportTab('local')"    id="rtab-local"    class="filter-btn">🏠 Local</button>
         <button onclick="setReportTab('conn')"     id="rtab-conn"     class="filter-btn">Connections</button>
       </div>
       <div id="rpane-overview">
@@ -282,6 +283,9 @@
             <p class="text-gray-600 p-3">Загрузка…</p>
           </div>
         </div>
+      </div>
+      <div id="rpane-local" class="hidden">
+        <div id="reports-local" class="text-gray-400 text-sm">Загрузка…</div>
       </div>
       <div id="rpane-conn" class="hidden">
         <div class="flex items-center gap-3 mb-3 flex-wrap">
@@ -1485,14 +1489,15 @@ let _allIps = [];
 
 function setReportTab(name) {
   _currentRTab = name;
-  ['overview', 'nodes', 'ips', 'conn'].forEach(t => {
+  ['overview', 'nodes', 'ips', 'conn', 'local'].forEach(t => {
     document.getElementById('rpane-' + t)?.classList.add('hidden');
     document.getElementById('rtab-'  + t)?.classList.remove('active');
   });
   document.getElementById('rpane-' + name)?.classList.remove('hidden');
   document.getElementById('rtab-'  + name)?.classList.add('active');
   if (name === 'conn') loadConnections();
-  if (name === 'ips' && _reportData) renderIpTable(_reportData.top_ips);
+  if (name === 'ips'   && _reportData) renderIpTable(_reportData.top_ips);
+  if (name === 'local' && _reportData) renderLocalPane(_reportData.local_intruders);
 }
 
 async function loadReports() {
@@ -1501,7 +1506,8 @@ async function loadReports() {
   _reportData = data;
   renderOverviewPane(data.global);
   renderNodesPane(data.nodes);
-  if (_currentRTab === 'ips') renderIpTable(data.top_ips);
+  if (_currentRTab === 'ips')   renderIpTable(data.top_ips);
+  if (_currentRTab === 'local') renderLocalPane(data.local_intruders);
 }
 
 function renderOverviewPane(g) {
@@ -1611,6 +1617,49 @@ function _renderFilteredIps(ips) {
         }).join('')}
       </tbody>
     </table>`;
+}
+
+function renderLocalPane(intruders) {
+  const el = document.getElementById('reports-local');
+  if (!intruders || !intruders.length) {
+    el.innerHTML = '<p class="text-green-600 p-3">\u2713 \u041f\u043e\u043f\u044b\u0442\u043e\u043a \u0438\u0437 \u043b\u043e\u043a\u0430\u043b\u044c\u043d\u044b\u0445 \u0441\u0435\u0442\u0435\u0439 \u043d\u0435 \u0437\u0430\u0444\u0438\u043a\u0441\u0438\u0440\u043e\u0432\u0430\u043d\u043e</p>';
+    return;
+  }
+  const clsColor = { scanner:'text-yellow-400', bruteforcer:'text-red-400', accidental:'text-gray-400', unknown:'text-gray-600' };
+  el.innerHTML = `
+    <div class="mb-3 flex items-center gap-2">
+      <span class="text-xs text-orange-400 font-bold">\u26a0 ${intruders.length} internal IP(s) detected</span>
+    </div>
+    <div class="bg-gray-800 rounded-xl border border-orange-900/50 overflow-hidden">
+      <table class="w-full text-xs">
+        <thead class="sticky top-0 bg-gray-800 text-gray-500 border-b border-gray-700">
+          <tr>
+            <th class="px-3 py-1.5 text-left">IP</th>
+            <th class="px-3 py-1.5 text-left">\u0422\u0438\u043f</th>
+            <th class="px-3 py-1.5 text-left">\u041d\u043e\u0434</th>
+            <th class="px-3 py-1.5 text-right">\u0412\u0441\u0442\u0440\u0435\u0447</th>
+            <th class="px-3 py-1.5 text-right">\u0421\u0435\u0441\u0441\u0438\u0439</th>
+            <th class="px-3 py-1.5 text-center">\ud83d\udd11</th>
+            <th class="px-3 py-1.5 text-left">\u041f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0440\u0430\u0437</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-700/40">
+          ${intruders.map(r => {
+            const cls = r.classification || 'unknown';
+            const ts  = (r.last_seen || '').slice(0,16).replace('T',' ');
+            return \`<tr class="hover:bg-orange-900/10">
+              <td class="px-3 py-1 font-mono text-orange-300 whitespace-nowrap">\${esc(r.ip)}</td>
+              <td class="px-3 py-1 \${clsColor[cls]||'text-gray-500'}">\${esc(cls)}</td>
+              <td class="px-3 py-1 text-gray-400 text-xs">\${esc(r.node_id||'\u2014')}</td>
+              <td class="px-3 py-1 text-right font-bold text-orange-300">\${r.count}</td>
+              <td class="px-3 py-1 text-right text-gray-300">\${r.max_sessions||'\u2014'}</td>
+              <td class="px-3 py-1 text-center">\${r.has_credentials ? '<span class="text-red-400 font-bold">\u25cf</span>' : '<span class="text-gray-700">\u25cb</span>'}</td>
+              <td class="px-3 py-1 text-gray-500 text-xs">\${esc(ts)}</td>
+            </tr>\`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>`;
 }
 
 // ── Connections ───────────────────────────────────────────────────────────────

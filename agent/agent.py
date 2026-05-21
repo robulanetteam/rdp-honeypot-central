@@ -298,6 +298,11 @@ def main():
     if conn_log.exists():
         _rotate_analytics_log(conn_log)
 
+    # Rotate local_intruders.jsonl if it exceeds 5MB
+    local_log = data_dir / "logs" / "local_intruders.jsonl"
+    if local_log.exists():
+        _rotate_analytics_log(local_log)
+
     blocklist = read_blocklist(data_dir)
     analytics = read_analytics(data_dir, days=cfg["analytics_days"])
     log("INFO", f"Collected {len(blocklist.splitlines())} blocklist lines, {len(analytics)} analytics events")

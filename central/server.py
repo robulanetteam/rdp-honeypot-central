@@ -1303,6 +1303,7 @@ async def api_reports(request: Request):
 
     # Global IP analytics from all submissions
     seen_ips: dict = {}
+    local_ips: dict = {}
     for row in subs:
         if not row["analytics"]:
             continue
@@ -1314,22 +1315,29 @@ async def api_reports(request: Request):
             ip = (e.get("source_ip") or "").strip()
             if not ip:
                 continue
-            if ip not in seen_ips:
-                seen_ips[ip] = {
+            is_local = bool(e.get("is_local", False))
+            target = local_ips if is_local else seen_ips
+            if ip not in target:
+                target[ip] = {
                     "ip":             ip,
                     "count":          0,
                     "classification": e.get("classification", "unknown"),
                     "country":        e.get("country") or "",
                     "max_sessions":   0,
                     "has_credentials": False,
+                    "node_id":        row["node_id"],
+                    "last_seen":      e.get("timestamp") or "",
                 }
-            seen_ips[ip]["count"] += 1
-            seen_ips[ip]["max_sessions"] = max(seen_ips[ip]["max_sessions"], e.get("sessions_total") or 0)
+            target[ip]["count"] += 1
+            target[ip]["max_sessions"] = max(target[ip]["max_sessions"], e.get("sessions_total") or 0)
             if e.get("has_credentials"):
-                seen_ips[ip]["has_credentials"] = True
+                target[ip]["has_credentials"] = True
+            if e.get("timestamp") and e["timestamp"] > target[ip]["last_seen"]:
+                target[ip]["last_seen"] = e["timestamp"]
             # last classification wins (most recent sub processed last — subs ordered DESC, so first is recent)
 
     top_ips = sorted(seen_ips.values(), key=lambda x: (-x["count"], -x["max_sessions"]))[:200]
+    local_intruders = sorted(local_ips.values(), key=lambda x: (-x["count"], x["ip"]))[:200]
 
     # Global counters
     total_subs     = len(subs)
@@ -1370,6 +1378,7 @@ async def api_reports(request: Request):
         },
         "nodes":   node_stats,
         "top_ips": top_ips,
+        "local_intruders": local_intruders,
     }
 
 
