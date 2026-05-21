@@ -1105,6 +1105,7 @@ def _do_deploy_internal(triggered_by: Optional[str] = None) -> dict:
 
     # Seed with currently deployed IPs — skip expired ones
     existing = DEPLOY_PATH / "blocklist.txt"
+    _prev_ips: set = set()
     if existing.exists():
         for line in existing.read_text(encoding="utf-8", errors="replace").splitlines():
             ip = line.strip()
@@ -1117,6 +1118,7 @@ def _do_deploy_internal(triggered_by: Optional[str] = None) -> dict:
                         continue  # expired — remove from list
                 except (ValueError, TypeError):
                     pass
+            _prev_ips.add(ip)
             ips.setdefault(ip, "deployed")
 
     for row in rows:
@@ -1200,11 +1202,48 @@ def _do_deploy_internal(triggered_by: Optional[str] = None) -> dict:
             except Exception:
                 pass
     _st = _build_analytics_stats(_all_an)
+
+    # Build per-IP info from analytics (last seen entry wins)
+    _ip_info: dict = {}
+    for _e in _all_an:
+        _sip = (_e.get("source_ip") or "").strip()
+        if not _sip:
+            continue
+        _ip_info[_sip] = {
+            "country": (_e.get("country") or "")[:2].upper() or "??",
+            "asn":     str(_e.get("asn") or ""),
+            "cls":     _e.get("classification") or "unknown",
+            "scope":   int(_e.get("scope") or 0),
+        }
+
+    # New IPs = added in this deploy that weren't in the previous blocklist
+    _new_ips = sorted(set(ips.keys()) - _prev_ips)
+
+    # Build IP list block (top 20 new IPs, sorted by scope desc)
+    _new_with_info = []
+    for _ip in _new_ips:
+        _inf = _ip_info.get(_ip, {})
+        _new_with_info.append((_ip, _inf.get("scope", 0), _inf.get("country", "??"),
+                               _inf.get("asn", ""), _inf.get("cls", "unknown")))
+    _new_with_info.sort(key=lambda x: -x[1])
+    _ip_lines = []
+    for _ip, _scope, _country, _asn, _cls in _new_with_info[:20]:
+        _asn_short = _asn.split(" ")[0] if _asn else "—"
+        _ip_lines.append(f"  <code>{_ip}</code>  {_country}  {_asn_short}  <i>{_cls}</i>  [{_scope}d]")
+    _new_block = ""
+    if _ip_lines:
+        _more = len(_new_ips) - 20 if len(_new_ips) > 20 else 0
+        _new_block = "\n<b>Новые IP (" + str(len(_new_ips)) + "):</b>\n" + "\n".join(_ip_lines)
+        if _more:
+            _new_block += f"\n  <i>...и ещё {_more}</i>"
+
     notify_telegram(
-        f"\U0001f680 <b>Deployed</b>" + (f" (auto: {triggered_by})" if triggered_by else " (manual)") + "\n"
-        f"\U0001f512 IP в блоклисте: {len(ips)}\n"
+        "\U0001f680 <b>Deployed</b>"
+        + (f" (auto: {triggered_by})" if triggered_by else " (manual)") + "\n"
+        f"\U0001f512 IP в блоклисте: {len(ips)} (+{len(_new_ips)} новых)\n"
         f"\U0001f916 Bruteforcers: {_st['bruteforcers']} | Scanners: {_st['scanners']}\n"
         f"\U0001f30d {_st['countries']}"
+        + _new_block
     )
 
     return {
