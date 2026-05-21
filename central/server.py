@@ -489,6 +489,11 @@ async def api_submit(
                 dr = _do_deploy_internal(triggered_by=node["id"])
                 with get_db() as c:
                     c.execute("UPDATE nodes SET last_auto_deployed_at=unixepoch() WHERE id=?", (node["id"],))
+                # Auto-prune expired IPs after each auto-deploy
+                try:
+                    _do_prune_internal()
+                except Exception as _pe:
+                    write_log(node["id"], "WARN", "auto_prune_failed", str(_pe)[:200])
                 return {
                     "status":        "auto_deployed",
                     "submission_id": sub_id,
@@ -1076,11 +1081,8 @@ def _do_deploy_internal(triggered_by: Optional[str] = None) -> dict:
     }
 
 
-@app.post("/api/deploy/prune")
-async def api_deploy_prune(request: Request):
-    """Remove expired IPs from deployed blocklist without requiring new submissions."""
-    require_admin(request)
-
+def _do_prune_internal() -> dict:
+    """Remove expired IPs from deployed blocklist. Returns result dict."""
     meta = _load_block_meta()
     if not meta:
         return {"pruned": 0, "remaining": 0, "message": "No metadata — nothing to prune"}
@@ -1150,6 +1152,13 @@ async def api_deploy_prune(request: Request):
         "remaining": len(active),
         "message":   f"Removed {pruned_count} expired IP(s), {len(active)} remain",
     }
+
+
+@app.post("/api/deploy/prune")
+async def api_deploy_prune(request: Request):
+    """Remove expired IPs from deployed blocklist without requiring new submissions."""
+    require_admin(request)
+    return _do_prune_internal()
 
 
 @app.get("/api/deployments")
@@ -1236,6 +1245,125 @@ async def api_connections(request: Request, limit: int = 2000):
 
     events = sorted(seen.values(), key=lambda x: (x["ts"] or 0), reverse=True)
     return events[:limit]
+
+
+# ── Reports ───────────────────────────────────────────────────────────────────
+
+@app.get("/api/reports")
+async def api_reports(request: Request):
+    """Aggregate statistics for the Reports section."""
+    require_admin(request)
+    with get_db() as c:
+        nodes = c.execute("SELECT id, label FROM nodes").fetchall()
+        subs  = c.execute("""
+            SELECT node_id, status, score, analytics, bl_size, submitted_at
+            FROM submissions
+        """).fetchall()
+        deps  = c.execute("SELECT sub_ids, ip_count, created_at FROM deployments ORDER BY created_at DESC").fetchall()
+
+    # Per-node stats
+    node_map = {n["id"]: {"id": n["id"], "label": n["label"],
+                           "submissions": 0, "deployed": 0, "total_ips": 0,
+                           "deploy_count": 0, "last_deployed": None} for n in nodes}
+
+    # Count deployments per node
+    for d in deps:
+        sub_ids = json.loads(d["sub_ids"] or "[]")
+        for row in subs:
+            if row["id"] if hasattr(row, "keys") else None:
+                pass
+        # approximate: find which nodes had subs deployed
+        with get_db() as c2:
+            for sid in sub_ids:
+                sr = c2.execute("SELECT node_id FROM submissions WHERE id=?", (sid,)).fetchone()
+                if sr and sr["node_id"] in node_map:
+                    node_map[sr["node_id"]]["deploy_count"] += 1
+                    node_map[sr["node_id"]]["total_ips"]    += d["ip_count"]
+                    ts = d["created_at"]
+                    prev = node_map[sr["node_id"]]["last_deployed"]
+                    if prev is None or ts > prev:
+                        node_map[sr["node_id"]]["last_deployed"] = ts
+
+    for row in subs:
+        nid = row["node_id"]
+        if nid not in node_map:
+            continue
+        node_map[nid]["submissions"] += 1
+        if row["status"] in ("deployed", "approved"):
+            node_map[nid]["deployed"] += 1
+
+    node_stats = sorted(node_map.values(), key=lambda x: -x["deploy_count"])
+
+    # Global IP analytics from all submissions
+    seen_ips: dict = {}
+    for row in subs:
+        if not row["analytics"]:
+            continue
+        try:
+            an = json.loads(row["analytics"])
+        except Exception:
+            continue
+        for e in an:
+            ip = (e.get("source_ip") or "").strip()
+            if not ip:
+                continue
+            if ip not in seen_ips:
+                seen_ips[ip] = {
+                    "ip":             ip,
+                    "count":          0,
+                    "classification": e.get("classification", "unknown"),
+                    "country":        e.get("country") or "",
+                    "max_sessions":   0,
+                    "has_credentials": False,
+                }
+            seen_ips[ip]["count"] += 1
+            seen_ips[ip]["max_sessions"] = max(seen_ips[ip]["max_sessions"], e.get("sessions_total") or 0)
+            if e.get("has_credentials"):
+                seen_ips[ip]["has_credentials"] = True
+            # last classification wins (most recent sub processed last — subs ordered DESC, so first is recent)
+
+    top_ips = sorted(seen_ips.values(), key=lambda x: (-x["count"], -x["max_sessions"]))[:200]
+
+    # Global counters
+    total_subs     = len(subs)
+    total_deployed = sum(1 for s in subs if s["status"] in ("deployed", "approved"))
+    deployed_ip_count = 0
+    existing = DEPLOY_PATH / "blocklist.txt"
+    if existing.exists():
+        deployed_ip_count = sum(
+            1 for line in existing.read_text(encoding="utf-8", errors="replace").splitlines()
+            if line.strip() and not line.startswith("#")
+        )
+    cred_count = sum(
+        1 for ip in seen_ips.values() if ip["has_credentials"]
+    )
+
+    # Classification breakdown across all analytics
+    cls_counts: dict = {}
+    for ip in seen_ips.values():
+        c = ip["classification"] or "unknown"
+        cls_counts[c] = cls_counts.get(c, 0) + 1
+
+    # Country breakdown top-10
+    country_counts: dict = {}
+    for ip in seen_ips.values():
+        co = ip["country"] or "Unknown"
+        country_counts[co] = country_counts.get(co, 0) + 1
+    top_countries = sorted(country_counts.items(), key=lambda x: -x[1])[:10]
+
+    return {
+        "global": {
+            "total_submissions": total_subs,
+            "total_deployed":    total_deployed,
+            "deployed_ip_count": deployed_ip_count,
+            "unique_ips_seen":   len(seen_ips),
+            "cred_captures":     cred_count,
+            "classification":    cls_counts,
+            "top_countries":     [{"country": k, "count": v} for k, v in top_countries],
+        },
+        "nodes":   node_stats,
+        "top_ips": top_ips,
+    }
 
 
 # ── Node commands (restart / update_agent) ────────────────────────────────────

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Honeypot Central</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <style>
@@ -18,6 +18,19 @@
   .badge-approved { background:#14532d; color:#86efac; }
   .badge-rejected { background:#7f1d1d; color:#fca5a5; }
   .badge-deployed { background:#1e3a5f; color:#93c5fd; }
+  .tab-btn { white-space: nowrap; }
+  #mobile-nav { display: none; }
+  #mobile-nav.open { display: flex; }
+  @media (max-width: 768px) {
+    #desktop-nav { display: none !important; }
+    #hamburger-btn { display: flex !important; }
+    main { padding: 0.75rem !important; }
+    .detail-grid { grid-template-columns: 1fr !important; }
+  }
+  @media (min-width: 769px) {
+    #hamburger-btn { display: none !important; }
+    #mobile-nav { display: none !important; }
+  }
 </style>
 </head>
 <body class="bg-gray-900 text-gray-100 min-h-screen text-sm">
@@ -47,28 +60,44 @@
 <div id="app" class="hidden flex flex-col min-h-screen">
 
   <!-- Header -->
-  <header class="bg-gray-800 border-b border-gray-700 px-6 py-3 flex items-center justify-between sticky top-0 z-10">
-    <div class="flex items-center gap-2">
-      <span class="text-xl">🍯</span>
-      <span class="font-bold text-white">Honeypot Central</span>
+  <header class="bg-gray-800 border-b border-gray-700 px-4 py-3 flex items-center justify-between sticky top-0 z-10">
+    <div class="flex items-center gap-2 min-w-0">
+      <span class="text-xl flex-shrink-0">🍯</span>
+      <span class="font-bold text-white truncate">Honeypot Central</span>
     </div>
-    <nav class="flex gap-1">
+    <nav id="desktop-nav" class="flex gap-1 flex-wrap justify-center">
       <button onclick="setTab('nodes')"       id="tab-nodes"       class="tab-btn">Nodes</button>
       <button onclick="setTab('submissions')" id="tab-submissions" class="tab-btn">Submissions</button>
       <button onclick="setTab('deploy')"      id="tab-deploy"      class="tab-btn">Deploy</button>
       <button onclick="setTab('whitelist')"   id="tab-whitelist"   class="tab-btn">Whitelist</button>
-      <button onclick="setTab('connections')" id="tab-connections" class="tab-btn">Connections</button>
+      <button onclick="setTab('reports')"     id="tab-reports"     class="tab-btn">Reports</button>
       <button onclick="setTab('logs')"        id="tab-logs"        class="tab-btn">Logs</button>
       <button onclick="setTab('settings')"    id="tab-settings"    class="tab-btn">Settings</button>
     </nav>
-    <div class="flex items-center gap-3">
+    <div class="flex items-center gap-2 flex-shrink-0">
       <span id="header-status" class="text-xs text-gray-600 hidden"></span>
-      <button onclick="logout()" class="text-gray-600 hover:text-gray-400 text-xs">Logout</button>
+      <button id="hamburger-btn" onclick="toggleMobileNav()"
+        class="flex-col gap-1 p-2 rounded hover:bg-gray-700 transition-colors hidden" aria-label="Menu">
+        <span class="block w-5 h-0.5 bg-gray-400"></span>
+        <span class="block w-5 h-0.5 bg-gray-400"></span>
+        <span class="block w-5 h-0.5 bg-gray-400"></span>
+      </button>
+      <button onclick="logout()" class="text-gray-600 hover:text-gray-400 text-xs whitespace-nowrap">Logout</button>
     </div>
   </header>
+  <!-- Mobile nav drawer -->
+  <div id="mobile-nav" class="bg-gray-800 border-b border-gray-700 flex-col gap-1 px-4 py-3 z-10">
+    <button onclick="setTab('nodes');toggleMobileNav()"       id="tab-nodes-m"       class="tab-btn w-full text-left">Nodes</button>
+    <button onclick="setTab('submissions');toggleMobileNav()" id="tab-submissions-m" class="tab-btn w-full text-left">Submissions</button>
+    <button onclick="setTab('deploy');toggleMobileNav()"      id="tab-deploy-m"      class="tab-btn w-full text-left">Deploy</button>
+    <button onclick="setTab('whitelist');toggleMobileNav()"   id="tab-whitelist-m"   class="tab-btn w-full text-left">Whitelist</button>
+    <button onclick="setTab('reports');toggleMobileNav()"     id="tab-reports-m"     class="tab-btn w-full text-left">Reports</button>
+    <button onclick="setTab('logs');toggleMobileNav()"        id="tab-logs-m"        class="tab-btn w-full text-left">Logs</button>
+    <button onclick="setTab('settings');toggleMobileNav()"    id="tab-settings-m"    class="tab-btn w-full text-left">Settings</button>
+  </div>
 
   <!-- Content -->
-  <main class="flex-1 p-6 max-w-7xl mx-auto w-full">
+  <main class="flex-1 p-3 sm:p-6 max-w-7xl mx-auto w-full">
 
     <!-- ── NODES ─────────────────────────────────────────────────────────── -->
     <div id="pane-nodes" class="pane">
@@ -224,19 +253,48 @@
       </div>
     </div><!-- /pane-logs -->
 
-    <!-- ── CONNECTIONS ──────────────────────────────────────────────────── -->
-    <div id="pane-connections" class="pane hidden">
-      <div class="flex items-center gap-3 mb-4">
-        <h2 class="text-orange-400 font-bold">Connections</h2>
-        <button onclick="loadConnections()" class="text-xs text-gray-500 hover:text-gray-300">↺ Refresh</button>
-        <span id="conn-count" class="ml-auto text-xs text-gray-600"></span>
+    <!-- ── REPORTS ─────────────────────────────────────────────── -->
+    <div id="pane-reports" class="pane hidden">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-orange-400 font-bold">Reports</h2>
+        <button onclick="loadReports()" class="text-xs text-gray-500 hover:text-gray-300">↺ Refresh</button>
       </div>
-      <div class="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
-        <div id="conn-table" class="overflow-y-auto text-xs" style="max-height:75vh">
-          <p class="text-gray-600 p-3">Загрузка…</p>
+      <div class="flex gap-1 mb-4 flex-wrap">
+        <button onclick="setReportTab('overview')" id="rtab-overview" class="filter-btn active">Overview</button>
+        <button onclick="setReportTab('nodes')"    id="rtab-nodes"    class="filter-btn">Honeypots</button>
+        <button onclick="setReportTab('ips')"      id="rtab-ips"      class="filter-btn">IP Analytics</button>
+        <button onclick="setReportTab('conn')"     id="rtab-conn"     class="filter-btn">Connections</button>
+      </div>
+      <div id="rpane-overview">
+        <div id="reports-global" class="text-gray-400 text-sm">Загрузка…</div>
+      </div>
+      <div id="rpane-nodes" class="hidden">
+        <div id="reports-nodes" class="text-gray-400 text-sm">Загрузка…</div>
+      </div>
+      <div id="rpane-ips" class="hidden">
+        <div class="flex items-center gap-3 mb-3 flex-wrap">
+          <input id="ip-search" oninput="filterIpTable()" placeholder="Поиск по IP / типу / стране…"
+            class="bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-orange-500 w-full sm:w-64">
+          <span id="ip-count" class="text-xs text-gray-600 ml-auto"></span>
+        </div>
+        <div class="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
+          <div id="reports-ips" class="overflow-x-auto text-xs" style="max-height:70vh">
+            <p class="text-gray-600 p-3">Загрузка…</p>
+          </div>
         </div>
       </div>
-    </div><!-- /pane-connections -->
+      <div id="rpane-conn" class="hidden">
+        <div class="flex items-center gap-3 mb-3 flex-wrap">
+          <button onclick="loadConnections()" class="text-xs text-gray-500 hover:text-gray-300">↺ Refresh</button>
+          <span id="conn-count" class="ml-auto text-xs text-gray-600"></span>
+        </div>
+        <div class="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
+          <div id="conn-table" class="overflow-y-auto overflow-x-auto text-xs" style="max-height:70vh">
+            <p class="text-gray-600 p-3">Загрузка…</p>
+          </div>
+        </div>
+      </div>
+    </div><!-- /pane-reports -->
 
     <!-- ── SETTINGS ──────────────────────────────────────────────────────── -->
     <div id="pane-settings" class="pane hidden">
@@ -433,16 +491,25 @@ function setTab(name) {
   document.querySelectorAll('.pane').forEach(p => p.classList.add('hidden'));
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('pane-' + name).classList.remove('hidden');
-  document.getElementById('tab-'  + name).classList.add('active');
+  const btn  = document.getElementById('tab-' + name);
+  const btnM = document.getElementById('tab-' + name + '-m');
+  if (btn)  btn.classList.add('active');
+  if (btnM) btnM.classList.add('active');
   const loaders = {
     nodes:       () => loadNodes(),
     submissions: () => loadSubs(currentSubFilter),
     deploy:      () => loadDeploy(),
     whitelist:   () => loadWhitelist(),
-    connections: () => loadConnections(),
+    reports:     () => loadReports(),
     logs:        () => loadLogs(),
     settings:    () => loadSettingsNodes(),
   };
+  loaders[name]?.();
+}
+
+function toggleMobileNav() {
+  document.getElementById('mobile-nav').classList.toggle('open');
+};
   loaders[name]?.();
 }
 
@@ -1392,6 +1459,142 @@ function fmtAgo(secs) {
   if (secs <  3600) return Math.floor(secs / 60)   + 'm ago';
   if (secs < 86400) return Math.floor(secs / 3600) + 'h ago';
   return Math.floor(secs / 86400) + 'd ago';
+}
+
+// ── Reports ─────────────────────────────────────────────────────────────────────────────
+
+let _reportData = null;
+let _currentRTab = 'overview';
+let _allIps = [];
+
+function setReportTab(name) {
+  _currentRTab = name;
+  ['overview', 'nodes', 'ips', 'conn'].forEach(t => {
+    document.getElementById('rpane-' + t)?.classList.add('hidden');
+    document.getElementById('rtab-'  + t)?.classList.remove('active');
+  });
+  document.getElementById('rpane-' + name)?.classList.remove('hidden');
+  document.getElementById('rtab-'  + name)?.classList.add('active');
+  if (name === 'conn') loadConnections();
+  if (name === 'ips' && _reportData) renderIpTable(_reportData.top_ips);
+}
+
+async function loadReports() {
+  const data = await api('GET', '/api/reports').catch(e => { alert(e); return null; });
+  if (!data) return;
+  _reportData = data;
+  renderOverviewPane(data.global);
+  renderNodesPane(data.nodes);
+  if (_currentRTab === 'ips') renderIpTable(data.top_ips);
+}
+
+function renderOverviewPane(g) {
+  const clsColors = { scanner:'text-yellow-400', bruteforcer:'text-red-400', accidental:'text-gray-400', unknown:'text-gray-600' };
+  const clsHtml = Object.entries(g.classification || {})
+    .sort((a,b) => b[1]-a[1])
+    .map(([k,v]) => `<div class="bg-gray-900 rounded p-3"><p class="text-xs ${clsColors[k]||'text-gray-400'} mb-1 font-bold">${esc(k)}</p><p class="text-xl font-bold text-white">${v}</p></div>`)
+    .join('');
+  const topCnt = (g.top_countries || []).map(c =>
+    `<div class="flex justify-between text-xs py-1 border-b border-gray-700/40"><span class="text-gray-300">${esc(c.country || 'Unknown')}</span><span class="text-gray-500 font-bold">${c.count}</span></div>`
+  ).join('');
+  document.getElementById('reports-global').innerHTML = `
+    <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-6">
+      <div class="bg-gray-800 rounded-xl border border-gray-700 p-4"><p class="text-xs text-gray-500 mb-1">Submissions</p><p class="text-2xl font-bold text-white">${g.total_submissions}</p></div>
+      <div class="bg-gray-800 rounded-xl border border-gray-700 p-4"><p class="text-xs text-gray-500 mb-1">Deployed</p><p class="text-2xl font-bold text-green-400">${g.total_deployed}</p></div>
+      <div class="bg-gray-800 rounded-xl border border-gray-700 p-4"><p class="text-xs text-gray-500 mb-1">IPs in blocklist</p><p class="text-2xl font-bold text-orange-400">${g.deployed_ip_count}</p></div>
+      <div class="bg-gray-800 rounded-xl border border-gray-700 p-4"><p class="text-xs text-gray-500 mb-1">Unique IPs</p><p class="text-2xl font-bold text-blue-400">${g.unique_ips_seen}</p></div>
+      <div class="bg-gray-800 rounded-xl border border-gray-700 p-4"><p class="text-xs text-gray-500 mb-1">Cred captures</p><p class="text-2xl font-bold text-red-400">${g.cred_captures}</p></div>
+    </div>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div class="bg-gray-800 rounded-xl border border-gray-700 p-4">
+        <p class="text-xs text-gray-500 font-bold mb-3">Classification</p>
+        <div class="grid grid-cols-2 gap-2">${clsHtml}</div>
+      </div>
+      <div class="bg-gray-800 rounded-xl border border-gray-700 p-4">
+        <p class="text-xs text-gray-500 font-bold mb-2">Top Countries</p>
+        ${topCnt || '<p class="text-gray-600 text-xs">No data</p>'}
+      </div>
+    </div>`;
+}
+
+function renderNodesPane(nodes) {
+  const el = document.getElementById('reports-nodes');
+  if (!nodes || !nodes.length) { el.innerHTML = '<p class="text-gray-500">Нет нод</p>'; return; }
+  el.innerHTML = `
+    <div class="overflow-x-auto">
+      <table class="w-full text-xs">
+        <thead class="text-gray-500 border-b border-gray-700">
+          <tr>
+            <th class="px-4 py-2 text-left">#</th>
+            <th class="px-4 py-2 text-left">Honeypot</th>
+            <th class="px-4 py-2 text-right">Submissions</th>
+            <th class="px-4 py-2 text-right">Deployed</th>
+            <th class="px-4 py-2 text-right">Total IPs</th>
+            <th class="px-4 py-2 text-right">Deploy count</th>
+            <th class="px-4 py-2 text-left">Last deployed</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-700/50">
+          ${nodes.map((n, i) => `
+          <tr class="hover:bg-gray-800/60">
+            <td class="px-4 py-2 text-gray-600">${i+1}</td>
+            <td class="px-4 py-2"><span class="font-bold text-white">${esc(n.label)}</span><span class="text-gray-600 ml-1">${esc(n.id)}</span></td>
+            <td class="px-4 py-2 text-right text-gray-300">${n.submissions}</td>
+            <td class="px-4 py-2 text-right text-green-400">${n.deployed}</td>
+            <td class="px-4 py-2 text-right text-orange-400 font-bold">${n.total_ips || 0}</td>
+            <td class="px-4 py-2 text-right"><span class="font-bold text-blue-400">${n.deploy_count}</span></td>
+            <td class="px-4 py-2 text-gray-500">${n.last_deployed ? fmtTs(n.last_deployed) : '—'}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function renderIpTable(ips) {
+  _allIps = ips || [];
+  document.getElementById('ip-count').textContent = `${_allIps.length} IP`;
+  _renderFilteredIps(_allIps);
+}
+
+function filterIpTable() {
+  const q = (document.getElementById('ip-search')?.value || '').toLowerCase();
+  const filtered = q ? _allIps.filter(r =>
+    (r.ip||'').includes(q) || (r.classification||'').includes(q) || (r.country||'').toLowerCase().includes(q)
+  ) : _allIps;
+  document.getElementById('ip-count').textContent = `${filtered.length} / ${_allIps.length} IP`;
+  _renderFilteredIps(filtered);
+}
+
+function _renderFilteredIps(ips) {
+  const el = document.getElementById('reports-ips');
+  if (!ips.length) { el.innerHTML = '<p class="text-gray-600 p-3">Нет данных</p>'; return; }
+  const clsColor = { scanner:'text-yellow-400', bruteforcer:'text-red-400', accidental:'text-gray-400', unknown:'text-gray-600' };
+  el.innerHTML = `
+    <table class="w-full min-w-max">
+      <thead class="sticky top-0 bg-gray-800 text-gray-500 border-b border-gray-700">
+        <tr>
+          <th class="px-3 py-1.5 text-left">IP</th>
+          <th class="px-3 py-1.5 text-left">Тип</th>
+          <th class="px-3 py-1.5 text-left">Страна</th>
+          <th class="px-3 py-1.5 text-right">Встреч</th>
+          <th class="px-3 py-1.5 text-right">Сессий</th>
+          <th class="px-3 py-1.5 text-center">🔑</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-700/40">
+        ${ips.map(r => {
+          const cls = r.classification || 'unknown';
+          return `<tr class="hover:bg-gray-800/60">
+            <td class="px-3 py-1 font-mono text-gray-200 whitespace-nowrap">${esc(r.ip)}</td>
+            <td class="px-3 py-1 whitespace-nowrap ${clsColor[cls]||'text-gray-500'}">${esc(cls)}</td>
+            <td class="px-3 py-1 text-gray-400 whitespace-nowrap">${esc(r.country||'—')}</td>
+            <td class="px-3 py-1 text-right font-bold text-orange-300">${r.count}</td>
+            <td class="px-3 py-1 text-right text-gray-300">${r.max_sessions||'—'}</td>
+            <td class="px-3 py-1 text-center">${r.has_credentials ? '<span class="text-red-400 font-bold">●</span>' : '<span class="text-gray-700">○</span>'}</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>`;
 }
 
 // ── Connections ───────────────────────────────────────────────────────────────
