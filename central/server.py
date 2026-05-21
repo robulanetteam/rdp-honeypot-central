@@ -1422,12 +1422,38 @@ async def api_deploy_prune(request: Request):
 
 @app.get("/api/blocklist/expiry")
 async def api_blocklist_expiry(request: Request):
-    """Return blocklist IPs with their block_until dates, sorted soonest-first."""
+    """Return blocklist IPs with their block_until dates, enriched with analytics."""
     require_admin(request)
     meta = _load_block_meta()
     if not meta:
         return {"entries": [], "next_expiry": None}
     now_ts = time.time()
+
+    # Build per-IP analytics index: ip -> {node_id, node_label, scope, classification}
+    _ip_an: dict = {}
+    with get_db() as c:
+        rows_an = c.execute("""
+            SELECT s.node_id, n.label AS node_label, s.analytics
+            FROM submissions s JOIN nodes n ON s.node_id = n.id
+            WHERE s.analytics IS NOT NULL
+            ORDER BY s.submitted_at DESC
+        """).fetchall()
+    for row in rows_an:
+        try:
+            an_list = json.loads(row["analytics"]) or []
+        except Exception:
+            continue
+        for e in an_list:
+            sip = (e.get("source_ip") or "").strip()
+            if not sip or sip in _ip_an:
+                continue
+            _ip_an[sip] = {
+                "node_id":    row["node_id"],
+                "node_label": row["node_label"] or row["node_id"],
+                "scope":      int(e.get("scope") or 0),
+                "cls":        e.get("classification") or "unknown",
+            }
+
     entries = []
     for ip, bu in meta.items():
         try:
@@ -1435,12 +1461,17 @@ async def api_blocklist_expiry(request: Request):
         except Exception:
             continue
         remaining_days = max(0, round((bu_ts - now_ts) / 86400, 1))
+        an = _ip_an.get(ip, {})
         entries.append({
-            "ip":             ip,
-            "block_until":    bu,
+            "ip":              ip,
+            "block_until":     bu,
             "block_until_fmt": datetime.fromisoformat(bu).strftime("%d.%m.%Y"),
-            "remaining_days": remaining_days,
-            "expired":        bu_ts <= now_ts,
+            "remaining_days":  remaining_days,
+            "expired":         bu_ts <= now_ts,
+            "node_id":         an.get("node_id", ""),
+            "node_label":      an.get("node_label", "—"),
+            "scope":           an.get("scope", 0),
+            "cls":             an.get("cls", "unknown"),
         })
     entries.sort(key=lambda x: x["block_until"])
     next_expiry = None

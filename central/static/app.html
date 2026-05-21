@@ -301,6 +301,8 @@
       </div>
       <div id="rpane-expiry" class="hidden">
         <div class="flex items-center gap-3 mb-3 flex-wrap">
+          <input id="expiry-search" oninput="_filterExpiry()" placeholder="Поиск по IP / ноде / типу…"
+            class="bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-orange-500 w-full sm:w-64">
           <button onclick="loadExpiryReport()" class="text-xs text-gray-500 hover:text-gray-300">↺ Refresh</button>
           <span id="expiry-summary" class="ml-auto text-xs text-gray-400"></span>
         </div>
@@ -1895,56 +1897,111 @@ function _renderConnTable() {
 
 // ── Telegram settings ─────────────────────────────────────────────────────────
 
+// ── Expiry report ─────────────────────────────────────────────────────────────
+let _expiryData = [];
+let _expirySort = { col: 'block_until', dir: 1 };
+let _expiryFilter = '';
+
 async function loadExpiryReport() {
   const el = document.getElementById('expiry-table');
   const sumEl = document.getElementById('expiry-summary');
   el.innerHTML = '<p class="text-gray-600 p-3">Загрузка…</p>';
-  const data = await api('GET', '/api/blocklist/expiry').catch(e => { el.innerHTML = '<p class="text-red-500 p-3">' + e.message + '</p>'; return null; });
+  const data = await api('GET', '/api/blocklist/expiry').catch(e => {
+    el.innerHTML = '<p class="text-red-500 p-3">' + e.message + '</p>'; return null;
+  });
   if (!data) return;
-  const { entries, next_expiry, total } = data;
-  if (!entries.length) {
-    el.innerHTML = '<p class="text-gray-600 p-3">Нет данных о сроках блокировки</p>';
-    sumEl.textContent = '';
-    return;
-  }
-  sumEl.textContent = 'Ближайшая разблокировка: ' + (next_expiry || '—') + '  |  Всего IP: ' + total;
-  const rows = entries.map(e => {
-    const expiredCls = e.expired ? 'text-red-400' : '';
-    const remStr = e.expired ? '<span class="text-red-400">истёк</span>'
-                             : (e.remaining_days < 7 ? '<span class="text-yellow-400">' + e.remaining_days + 'd</span>'
-                                                      : '<span class="text-gray-300">' + e.remaining_days + 'd</span>');
-    const ipSafe = esc(e.ip);
+  _expiryData = data.entries || [];
+  const next = data.next_expiry || '—';
+  sumEl.textContent = 'Ближайшая разблокировка: ' + next + '  |  Всего IP: ' + data.total;
+  _renderExpiryTable();
+}
+
+function _expiryHeaderBtn(col, label) {
+  const arrow = _expirySort.col === col ? (_expirySort.dir === 1 ? ' ↑' : ' ↓') : '';
+  return '<button onclick="_expirySortBy(\'' + col + '\')" class="hover:text-white whitespace-nowrap">' + label + arrow + '</button>';
+}
+
+function _expirySortBy(col) {
+  if (_expirySort.col === col) _expirySort.dir *= -1;
+  else { _expirySort.col = col; _expirySort.dir = col === 'remaining_days' ? 1 : 1; }
+  _renderExpiryTable();
+}
+
+function _filterExpiry() {
+  _expiryFilter = (document.getElementById('expiry-search')?.value || '').trim().toLowerCase();
+  _renderExpiryTable();
+}
+
+function _renderExpiryTable() {
+  const el = document.getElementById('expiry-table');
+  if (!el) return;
+  const clsColor = { scanner: 'text-yellow-400', bruteforcer: 'text-red-400', accidental: 'text-gray-400', unknown: 'text-gray-600' };
+  const comparators = {
+    ip:             (a, b) => a.ip.localeCompare(b.ip),
+    block_until:    (a, b) => a.block_until.localeCompare(b.block_until),
+    remaining_days: (a, b) => a.remaining_days - b.remaining_days,
+    node_label:     (a, b) => (a.node_label||'').localeCompare(b.node_label||''),
+    scope:          (a, b) => a.scope - b.scope,
+    cls:            (a, b) => (a.cls||'').localeCompare(b.cls||''),
+  };
+  const cmp = comparators[_expirySort.col] || comparators.block_until;
+  let list = _expiryFilter
+    ? _expiryData.filter(e => e.ip.includes(_expiryFilter)
+        || (e.node_label||'').toLowerCase().includes(_expiryFilter)
+        || (e.cls||'').toLowerCase().includes(_expiryFilter))
+    : _expiryData;
+  list = [...list].sort((a, b) => _expirySort.dir * cmp(a, b));
+
+  const H = col => _expiryHeaderBtn(col, {
+    ip: 'IP-адрес', block_until: 'Заблокирован до', remaining_days: 'Осталось',
+    node_label: 'Нода', scope: 'Scope', cls: 'Тип',
+  }[col]);
+
+  const rows = list.map(e => {
+    const expCls = e.expired ? 'text-red-400' : '';
+    const remStr = e.expired
+      ? '<span class="text-red-400">истёк</span>'
+      : (e.remaining_days < 7
+          ? '<span class="text-yellow-400">' + e.remaining_days + 'd</span>'
+          : '<span class="text-gray-300">' + e.remaining_days + 'd</span>');
     const ipAttr = e.ip.replace(/"/g, '&quot;');
     return '<tr class="hover:bg-gray-800/60">'
-      + '<td class="px-3 py-1 font-mono ' + expiredCls + ' whitespace-nowrap">' + ipSafe + '</td>'
+      + '<td class="px-3 py-1 font-mono ' + expCls + ' whitespace-nowrap">' + esc(e.ip) + '</td>'
       + '<td class="px-3 py-1 text-gray-300 whitespace-nowrap">' + esc(e.block_until_fmt) + '</td>'
       + '<td class="px-3 py-1 text-right whitespace-nowrap">' + remStr + '</td>'
+      + '<td class="px-3 py-1 text-gray-400 whitespace-nowrap">' + esc(e.node_label || '—') + '</td>'
+      + '<td class="px-3 py-1 text-right text-gray-300 whitespace-nowrap">' + (e.scope || '—') + 'd</td>'
+      + '<td class="px-3 py-1 whitespace-nowrap ' + (clsColor[e.cls] || 'text-gray-500') + '">' + esc(e.cls || '—') + '</td>'
       + '<td class="px-3 py-1 text-right whitespace-nowrap">'
-      +   '<button onclick="expiryRemoveIp(&quot;' + ipAttr + '&quot;)" class="text-xs text-red-400 hover:text-red-300 mr-2" title="Удалить из блоклиста">✕ Удалить</button>'
+      +   '<button onclick="expiryRemoveIp(&quot;' + ipAttr + '&quot;)" class="text-xs text-red-400 hover:text-red-300 mr-2" title="Удалить из блоклиста">✕</button>'
       +   '<button onclick="expiryWhitelistIp(&quot;' + ipAttr + '&quot;)" class="text-xs text-green-400 hover:text-green-300" title="Добавить в whitelist">✓ WL</button>'
       + '</td>'
       + '</tr>';
   }).join('');
+
   el.innerHTML = '<table class="w-full border-collapse">'
-    + '<thead><tr class="border-b border-gray-700 text-gray-400">'
-    + '<th class="px-3 py-2 text-left font-medium">IP-адрес</th>'
-    + '<th class="px-3 py-2 text-left font-medium">Заблокирован до</th>'
-    + '<th class="px-3 py-2 text-right font-medium">Осталось</th>'
-    + '<th class="px-3 py-2 text-right font-medium">Действия</th>'
+    + '<thead><tr class="border-b border-gray-700 text-gray-400 text-xs">'
+    + '<th class="px-3 py-2 text-left">' + H('ip') + '</th>'
+    + '<th class="px-3 py-2 text-left">' + H('block_until') + '</th>'
+    + '<th class="px-3 py-2 text-right">' + H('remaining_days') + '</th>'
+    + '<th class="px-3 py-2 text-left">' + H('node_label') + '</th>'
+    + '<th class="px-3 py-2 text-right">' + H('scope') + '</th>'
+    + '<th class="px-3 py-2 text-left">' + H('cls') + '</th>'
+    + '<th class="px-3 py-2 text-right">Действия</th>'
     + '</tr></thead><tbody>' + rows + '</tbody></table>';
 }
 
 async function expiryRemoveIp(ip) {
   if (!confirm('Удалить ' + ip + ' из блоклиста?')) return;
   try {
-    const r = await api('DELETE', '/api/blocklist/ip/' + encodeURIComponent(ip));
+    await api('DELETE', '/api/blocklist/ip/' + encodeURIComponent(ip));
     loadExpiryReport();
   } catch(e) { alert('Ошибка: ' + e.message); }
 }
 
 async function expiryWhitelistIp(ip) {
-  const note = prompt('Добавить ' + ip + ' в whitelist.\nПримечание (опционально):') ;
-  if (note === null) return;  // cancelled
+  const note = prompt('Добавить ' + ip + ' в whitelist.\nПримечание (опционально):');
+  if (note === null) return;
   try {
     await api('POST', '/api/whitelist', { ip, note });
     await api('DELETE', '/api/blocklist/ip/' + encodeURIComponent(ip));
