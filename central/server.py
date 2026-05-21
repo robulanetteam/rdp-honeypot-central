@@ -1214,13 +1214,25 @@ def _meta_from_analytics(rows, greylist: set = None) -> dict:
 
 
 def _meta_merge(meta: dict, new_meta: dict) -> None:
-    """Merge new_meta into meta, keeping the LONGEST block_until per IP."""
+    """Merge new_meta into meta, keeping the LONGEST block_until per IP.
+    Always upgrades legacy string entries to the new dict format."""
     for ip, new_val in new_meta.items():
         new_bu = _get_bu(new_val)
-        old_bu = _get_bu(meta.get(ip))
-        if old_bu is None or (new_bu and new_bu > old_bu):
+        old_val = meta.get(ip)
+        old_bu = _get_bu(old_val)
+        if old_bu is None:
             meta[ip] = new_val
-        # else: keep old (longer) entry as-is
+        elif new_bu and new_bu > old_bu:
+            meta[ip] = new_val
+        elif isinstance(old_val, str) and isinstance(new_val, dict) and new_bu:
+            # Upgrade legacy string to dict format; preserve the longer block_until
+            if old_bu > new_bu:
+                upgraded = dict(new_val)
+                upgraded["until"] = old_bu
+                meta[ip] = upgraded
+            else:
+                meta[ip] = new_val
+        # else: keep old (longer) dict entry as-is
 
 
 @app.post("/api/deploy")
