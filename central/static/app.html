@@ -1908,16 +1908,21 @@ async function loadExpiryReport() {
     return;
   }
   sumEl.textContent = 'Ближайшая разблокировка: ' + (next_expiry || '—') + '  |  Всего IP: ' + total;
-  const now = Date.now() / 1000;
   const rows = entries.map(e => {
     const expiredCls = e.expired ? 'text-red-400' : '';
     const remStr = e.expired ? '<span class="text-red-400">истёк</span>'
                              : (e.remaining_days < 7 ? '<span class="text-yellow-400">' + e.remaining_days + 'd</span>'
                                                       : '<span class="text-gray-300">' + e.remaining_days + 'd</span>');
+    const ipSafe = esc(e.ip);
+    const ipAttr = e.ip.replace(/"/g, '&quot;');
     return '<tr class="hover:bg-gray-800/60">'
-      + '<td class="px-3 py-1 font-mono ' + expiredCls + ' whitespace-nowrap">' + esc(e.ip) + '</td>'
+      + '<td class="px-3 py-1 font-mono ' + expiredCls + ' whitespace-nowrap">' + ipSafe + '</td>'
       + '<td class="px-3 py-1 text-gray-300 whitespace-nowrap">' + esc(e.block_until_fmt) + '</td>'
       + '<td class="px-3 py-1 text-right whitespace-nowrap">' + remStr + '</td>'
+      + '<td class="px-3 py-1 text-right whitespace-nowrap">'
+      +   '<button onclick="expiryRemoveIp(&quot;' + ipAttr + '&quot;)" class="text-xs text-red-400 hover:text-red-300 mr-2" title="Удалить из блоклиста">✕ Удалить</button>'
+      +   '<button onclick="expiryWhitelistIp(&quot;' + ipAttr + '&quot;)" class="text-xs text-green-400 hover:text-green-300" title="Добавить в whitelist">✓ WL</button>'
+      + '</td>'
       + '</tr>';
   }).join('');
   el.innerHTML = '<table class="w-full border-collapse">'
@@ -1925,7 +1930,26 @@ async function loadExpiryReport() {
     + '<th class="px-3 py-2 text-left font-medium">IP-адрес</th>'
     + '<th class="px-3 py-2 text-left font-medium">Заблокирован до</th>'
     + '<th class="px-3 py-2 text-right font-medium">Осталось</th>'
+    + '<th class="px-3 py-2 text-right font-medium">Действия</th>'
     + '</tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+async function expiryRemoveIp(ip) {
+  if (!confirm('Удалить ' + ip + ' из блоклиста?')) return;
+  try {
+    const r = await api('DELETE', '/api/blocklist/ip/' + encodeURIComponent(ip));
+    loadExpiryReport();
+  } catch(e) { alert('Ошибка: ' + e.message); }
+}
+
+async function expiryWhitelistIp(ip) {
+  const note = prompt('Добавить ' + ip + ' в whitelist.\nПримечание (опционально):') ;
+  if (note === null) return;  // cancelled
+  try {
+    await api('POST', '/api/whitelist', { ip, note });
+    await api('DELETE', '/api/blocklist/ip/' + encodeURIComponent(ip));
+    loadExpiryReport();
+  } catch(e) { alert('Ошибка: ' + e.message); }
 }
 
 

@@ -1451,7 +1451,57 @@ async def api_blocklist_expiry(request: Request):
     return {"entries": entries, "next_expiry": next_expiry, "total": len(entries)}
 
 
+def _rewrite_blocklist_without(remove_ips: set) -> int:
+    """Remove IPs from deployed blocklist files and meta. Returns remaining count."""
+    existing = DEPLOY_PATH / "blocklist.txt"
+    if not existing.exists():
+        return 0
+    with get_db() as c:
+        wl = {r["ip"] for r in c.execute("SELECT ip FROM whitelist").fetchall()}
+    all_ips = []
+    for line in existing.read_text(encoding="utf-8", errors="replace").splitlines():
+        ip = line.strip()
+        if ip and not ip.startswith("#"):
+            all_ips.append(ip)
+    active = [ip for ip in all_ips if ip not in remove_ips and ip not in wl]
+    sorted_ips = sorted(set(active))
+    generated  = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+    (DEPLOY_PATH / "blocklist.txt").write_text("\n".join(sorted_ips) + "\n")
+    pf_lines = [
+        "# Honeypot Central – pfBlockerNG blocklist",
+        f"# Generated : {generated}",
+        f"# IPs       : {len(sorted_ips)}", "",
+    ] + sorted_ips + [""]
+    (DEPLOY_PATH / "blocklist_pfblocker.txt").write_text("\n".join(pf_lines))
+    mt_lines = [
+        "# Honeypot Central – MikroTik address-list",
+        f"# Generated : {generated}",
+        f"# IPs       : {len(sorted_ips)}",
+        f"# List name : {MIKROTIK_LIST_NAME}", "",
+        f"/ip firewall address-list",
+        f"remove [find list={MIKROTIK_LIST_NAME}]",
+    ] + [f'add address={ip} list={MIKROTIK_LIST_NAME} comment="honeypot-central"'
+         for ip in sorted_ips] + [""]
+    (DEPLOY_PATH / "blocklist_mikrotik.rsc").write_text("\n".join(mt_lines))
+    # Clean meta
+    meta = _load_block_meta()
+    for ip in remove_ips:
+        meta.pop(ip, None)
+    _save_block_meta(meta)
+    return len(sorted_ips)
 
+
+@app.delete("/api/blocklist/ip/{ip:path}")
+async def api_blocklist_remove_ip(ip: str, request: Request):
+    """Remove a single IP from the deployed blocklist immediately."""
+    require_admin(request)
+    ip = ip.strip()
+    remaining = _rewrite_blocklist_without({ip})
+    write_log(None, "INFO", "blocklist_remove", f"ip={ip} remaining={remaining}")
+    return {"removed": ip, "remaining": remaining}
+
+
+@app.get("/api/deployments")
 async def api_deployments(request: Request):
     require_admin(request)
     with get_db() as c:
